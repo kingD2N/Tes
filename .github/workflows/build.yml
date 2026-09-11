@@ -25,14 +25,24 @@ on:
         type: string
         default: "lineage-23.2"
 
+      devicetree_preset:
+        description: "Pick a known devicetree source+branch pair, or Custom to use the two raw fields below. kingD2N-AOSP13 is the repo actually named and branched for Android 13 (lineage-20, correct LOS numbering match). kingD2N-generic-lineage22.2 is the earlier default (lineage-22.2, closer to LOS Android 15 by branch naming) kept here for comparison/fallback."
+        required: true
+        type: choice
+        default: "kingD2N-AOSP13"
+        options:
+          - kingD2N-AOSP13
+          - kingD2N-generic-lineage22.2
+          - Custom
+
       devicetree_source:
-        description: "Devicetree source repo URL (kernel-level arch/arm64/boot/dts/vendor, not an Android device tree). Defaults to your own kingD2N sm8450-devicetrees repo instead of Ingres-Centre's."
+        description: "Devicetree source repo URL (kernel-level arch/arm64/boot/dts/vendor, not an Android device tree). Only read when devicetree_preset above is set to Custom."
         required: true
         type: string
         default: "https://github.com/kingD2N/android_kernel_xiaomi_sm8450-devicetrees"
 
       devicetree_branch:
-        description: "Branch on devicetree_source above. Note: this defaults to lineage-22.2 (LOS numbering ~ Android 15), even though this workflow targets AOSP Android 13 - ingres is permanently locked to the android12-5.10 GKI base regardless of ROM version (Android 12 launch policy), so KERNEL_BASE below stays android12 either way. This branch just picks which hardware devicetree revision to build against - double check it's the one you meant."
+        description: "Branch on devicetree_source above. Only read when devicetree_preset above is set to Custom. KERNEL_BASE below always stays android12 regardless of which devicetree preset/branch you pick - ingres is permanently locked to the android12-5.10 GKI base by its Android 12 launch."
         required: true
         type: string
         default: "lineage-22.2"
@@ -163,10 +173,27 @@ jobs:
           git clone --depth=1 -b ${{ inputs.kernel_branch }} ${{ inputs.kernel_source }} ${SOC}
           git clone --depth=1 -b ${{ inputs.modules_branch }} https://github.com/LineageOS/android_kernel_xiaomi_${SOC}-modules.git ${SOC}-modules
 
+          case "${{ inputs.devicetree_preset }}" in
+            "kingD2N-AOSP13")
+              DT_SOURCE="https://github.com/kingD2N/android13_kernel_qcom_sm8450-devicetrees"
+              DT_BRANCH="lineage-20"
+              ;;
+            "kingD2N-generic-lineage22.2")
+              DT_SOURCE="https://github.com/kingD2N/android_kernel_xiaomi_sm8450-devicetrees"
+              DT_BRANCH="lineage-22.2"
+              ;;
+            "Custom")
+              DT_SOURCE="${{ inputs.devicetree_source }}"
+              DT_BRANCH="${{ inputs.devicetree_branch }}"
+              ;;
+          esac
+          echo "==> Devicetree preset '${{ inputs.devicetree_preset }}' -> ${DT_SOURCE} @ ${DT_BRANCH}"
+          echo "DT_SOURCE=${DT_SOURCE}" >> $GITHUB_ENV
+          echo "DT_BRANCH=${DT_BRANCH}" >> $GITHUB_ENV
 
           rm -rf ${SOC}/arch/arm64/boot/dts/vendor
-          git clone --depth=1 -b ${{ inputs.devicetree_branch }} ${{ inputs.devicetree_source }} ${SOC}/arch/arm64/boot/dts/vendor \
-            || git clone --depth=1 ${{ inputs.devicetree_source }} ${SOC}/arch/arm64/boot/dts/vendor
+          git clone --depth=1 -b "${DT_BRANCH}" "${DT_SOURCE}" ${SOC}/arch/arm64/boot/dts/vendor \
+            || git clone --depth=1 "${DT_SOURCE}" ${SOC}/arch/arm64/boot/dts/vendor
 
       - name: Detect kernel version
         run: |
@@ -618,7 +645,7 @@ jobs:
           | 🟠 ROM Support | AOSP Android 13 |
           | 🖥️ Kernel Name | ${KERNEL_NAME} |
           | 🧬 Kernel Base | ${KERNEL_BASE} |
-          | 🌳 Devicetree | ${{ inputs.devicetree_source }} @ ${{ inputs.devicetree_branch }} |
+          | 🌳 Devicetree | ${DT_SOURCE} @ ${DT_BRANCH} |
           | 🛠️ Build Scope | ZIP |
           | 📦 Source | ${{ inputs.kernel_source }} |
           | ⚔️ Kernel branch | ${{ inputs.kernel_branch }} |
