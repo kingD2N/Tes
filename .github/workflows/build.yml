@@ -80,10 +80,10 @@ on:
         default: true
 
       susfs_commit:
-        description: "Custom commit SHA for susfs4ksu. Default dikunci ke f33f348d (gki-android12-5.10) - commit terakhir yang terbukti apply bersih di build referensi ingres per 15 Sep 2026. Kosongkan untuk balik ke 'latest' (bisa gagal lagi kalau upstream drift lagi)."
+        description: "Custom commit SHA for susfs4ksu (branch gki-android12-5.10). Kosongkan (default) untuk selalu pakai commit terbaru di branch tsb. Kalau diisi, workflow sekarang otomatis fallback ke HEAD branch bila hash yang diisi tidak ditemukan atau folder kernel_patches di commit itu tidak lengkap - jadi run tidak langsung gagal keras seperti sebelumnya."
         required: false
         type: string
-        default: "f33f348d"
+        default: ""
 
       BBG:
         description: "Add BBG support"
@@ -352,21 +352,45 @@ jobs:
           esac
 
           if [[ "${{ inputs.susfs }}" == true ]]; then
-            
-            git clone -b gki-android12-5.10 https://gitlab.com/simonpunk/susfs4ksu.git susfs
+
+            # --single-branch penting: tanpa ini, `git checkout <short-hash>` di bawah
+            # bisa "nyasar" ke commit dari branch lain di repo susfs4ksu yang sama
+            # (mis. gki-android13-5.15) yang path patch-nya beda nama, dan itu persis
+            # penyebab error "cp: cannot stat ...50_add_susfs_in_gki-android12-5.10.patch"
+            # yang muncul di run sebelumnya.
+            git clone -b gki-android12-5.10 --single-branch https://gitlab.com/simonpunk/susfs4ksu.git susfs
             cd susfs
+
+            PATCH_FILE="kernel_patches/50_add_susfs_in_gki-android12-5.10.patch"
 
             if [[ -n "${{ inputs.susfs_commit }}" ]]; then
               echo "==> SUSFS: pinning to custom commit ${{ inputs.susfs_commit }}"
-              git checkout "${{ inputs.susfs_commit }}"
+              if ! git checkout "${{ inputs.susfs_commit }}" 2>/dev/null; then
+                echo "::warning::Commit '${{ inputs.susfs_commit }}' tidak ditemukan di branch gki-android12-5.10. Fallback ke HEAD branch (latest)."
+                git checkout gki-android12-5.10
+              fi
             else
               echo "==> SUSFS: using latest commit on branch gki-android12-5.10"
             fi
 
             SUSFS_COMMIT=$(git rev-parse --short HEAD)
-            echo "SUSFS_COMMIT=${SUSFS_COMMIT}" >> $GITHUB_ENV
             echo "==> SUSFS: checked out commit ${SUSFS_COMMIT}"
-            cp ./kernel_patches/50_add_susfs_in_gki-android12-5.10.patch ..
+
+            if [[ ! -f "$PATCH_FILE" ]]; then
+              echo "::warning::'$PATCH_FILE' tidak ada di commit ${SUSFS_COMMIT}. Isi kernel_patches/ di commit ini:"
+              ls -la kernel_patches/ 2>&1 || echo "(folder kernel_patches/ sendiri tidak ada di commit ini)"
+              echo "==> Fallback: checkout HEAD branch gki-android12-5.10 dan coba lagi..."
+              git checkout gki-android12-5.10
+              SUSFS_COMMIT=$(git rev-parse --short HEAD)
+              echo "==> SUSFS: pakai HEAD (${SUSFS_COMMIT}) sebagai fallback"
+              if [[ ! -f "$PATCH_FILE" ]]; then
+                echo "::error::'$PATCH_FILE' tetap tidak ditemukan bahkan di HEAD branch gki-android12-5.10 (${SUSFS_COMMIT}). Struktur repo susfs4ksu kemungkinan berubah - cek manual: https://gitlab.com/simonpunk/susfs4ksu/-/tree/gki-android12-5.10/kernel_patches"
+                exit 1
+              fi
+            fi
+
+            echo "SUSFS_COMMIT=${SUSFS_COMMIT}" >> $GITHUB_ENV
+            cp "./$PATCH_FILE" ..
             cp ./kernel_patches/fs/* ../fs/
             cp ./kernel_patches/include/linux/* ../include/linux/
             cd ..
