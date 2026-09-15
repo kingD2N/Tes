@@ -364,7 +364,13 @@ jobs:
             cp ./kernel_patches/fs/* ../fs/
             cp ./kernel_patches/include/linux/* ../include/linux/
             cd ..
-            patch -p1 < 50_add_susfs_in_gki-android12-5.10.patch
+            if ! patch -p1 < 50_add_susfs_in_gki-android12-5.10.patch; then
+              echo "::error::SUSFS patch gagal apply bersih ke tree kernel ini. Kemungkinan besar penyebabnya: KernelSU-Next (dev-susfs, selalu tarik commit terbaru) dan susfs4ksu (branch gki-android12-5.10, juga bisa 'latest' kalau susfs_commit dikosongkan) sudah tidak sinkron satu sama lain. Coba isi input 'susfs_commit' dengan commit susfs4ksu yang lebih lama, atau cek riwayat commit pershoot/KernelSU-Next branch dev-susfs untuk versi yang sezaman."
+              echo "::group::Isi file .rej (hunk yang gagal, untuk debug)"
+              find . -name "*.rej" -print -exec echo "--- {} ---" \; -exec cat {} \;
+              echo "::endgroup::"
+              exit 1
+            fi
             echo "CONFIG_KSU_SUSFS=y" >> arch/arm64/configs/gki_defconfig
             echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> arch/arm64/configs/gki_defconfig
             echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> arch/arm64/configs/gki_defconfig
