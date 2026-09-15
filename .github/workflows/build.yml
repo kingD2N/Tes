@@ -80,10 +80,10 @@ on:
         default: true
 
       susfs_commit:
-        description: "Custom commit SHA for susfs4ksu. Default dikunci ke 85a6009 (gki-android12-5.10) - commit terakhir yang terbukti apply bersih di build referensi ingres per 15 Sep 2026. Kosongkan untuk balik ke 'latest' (bisa gagal lagi kalau upstream drift lagi)."
+        description: "Custom commit SHA for susfs4ksu. Default dikunci ke f33f348d (gki-android12-5.10) - commit terakhir yang terbukti apply bersih di build referensi ingres per 15 Sep 2026. Kosongkan untuk balik ke 'latest' (bisa gagal lagi kalau upstream drift lagi)."
         required: false
         type: string
-        default: "85a6009"
+        default: "f33f348d"
 
       BBG:
         description: "Add BBG support"
