@@ -1,4 +1,4 @@
-name: Compile Kernel Melt Rebase - POCO F4 GT (Ingres) - AOSP Android 13
+name: Compile Kernel Melt Rebase - POCO F4 GT (Ingres) - AOSP Android 16
 
 on:
   workflow_dispatch:
@@ -20,17 +20,18 @@ on:
           - melt-MIX
 
       modules_branch:
-        description: "Branch for the LineageOS modules repo (unaffected by kernel_source/kernel_branch above - currently defaults to lineage-23.2)"
+        description: "Branch for the LineageOS modules repo (unaffected by kernel_source/kernel_branch above). Defaults to lineage-23.2 to match the Android 16 target of this workflow."
         required: true
         type: string
         default: "lineage-23.2"
 
       devicetree_preset:
-        description: "Pick a known devicetree source+branch pair, or Custom to use the two raw fields below. kingD2N-AOSP13 is the repo actually named and branched for Android 13 (lineage-20, correct LOS numbering match). kingD2N-generic-lineage22.2 is the earlier default (lineage-22.2, closer to LOS Android 15 by branch naming) kept here for comparison/fallback."
+        description: "Pick a known devicetree source+branch pair, or Custom to use the two raw fields below. kingD2N-A16-lineage23.2 (default) tracks LineageOS 23.2 / Android 16 - confirmed the current default branch on kingD2N's devicetree repo. kingD2N-AOSP13 is the older repo/branch pair for Android 13 (lineage-20). kingD2N-generic-lineage22.2 is the earlier lineage-22.2 pairing (closer to LOS Android 15), kept for comparison/fallback."
         required: true
         type: choice
-        default: "kingD2N-AOSP13"
+        default: "kingD2N-A16-lineage23.2"
         options:
+          - kingD2N-A16-lineage23.2
           - kingD2N-AOSP13
           - kingD2N-generic-lineage22.2
           - Custom
@@ -45,7 +46,7 @@ on:
         description: "Branch on devicetree_source above. Only read when devicetree_preset above is set to Custom. KERNEL_BASE below always stays android12 regardless of which devicetree preset/branch you pick - ingres is permanently locked to the android12-5.10 GKI base by its Android 12 launch."
         required: true
         type: string
-        default: "lineage-22.2"
+        default: "lineage-23.2"
 
       ksu_type:
         description: "KernelSU Version (default diganti ke ReSukiSU - per 15 Sep 2026, kombinasi KernelSU-Next dev-susfs + susfs4ksu gki-android12-5.10 lagi gagal patch; ReSukiSU + susfs terbukti sukses di build referensi terbaru dari sumber kernel yang sama)"
@@ -64,8 +65,9 @@ on:
         description: "kernel"
         required: false
         type: choice
-        default: AOSP13-KERNEL
+        default: AOSP16-KERNEL
         options:
+          - AOSP16-KERNEL
           - AOSP13-KERNEL
           - Melt-KERNEL
           - MIX™-KERNEL
@@ -174,6 +176,10 @@ jobs:
           git clone --depth=1 -b ${{ inputs.modules_branch }} https://github.com/LineageOS/android_kernel_xiaomi_${SOC}-modules.git ${SOC}-modules
 
           case "${{ inputs.devicetree_preset }}" in
+            "kingD2N-A16-lineage23.2")
+              DT_SOURCE="https://github.com/kingD2N/android_kernel_xiaomi_sm8450-devicetrees"
+              DT_BRANCH="lineage-23.2"
+              ;;
             "kingD2N-AOSP13")
               DT_SOURCE="https://github.com/kingD2N/android13_kernel_qcom_sm8450-devicetrees"
               DT_BRANCH="lineage-20"
@@ -208,7 +214,7 @@ jobs:
           fi
 
           # KERNEL_BASE intentionally stays "android12" here even though this workflow
-          # targets an AOSP Android 13 build: ingres shipped on Android 12, so per Google's
+          # targets an AOSP Android 16 build: ingres shipped on Android 12, so per Google's
           # GKI KMI policy it is permanently locked to the android12-5.10 kernel base -
           # vendor .ko blobs are compiled against that ABI regardless of which Android
           # version the ROM on top is running. Only the devicetree source and the ROM
@@ -572,7 +578,7 @@ jobs:
 
       - name: Make AnyKernel3
         run: |
-          ZIP_NAME="${KERNEL_NAME}_AOSP13_${{ inputs.ksu_type }}"
+          ZIP_NAME="${KERNEL_NAME}_AOSP16_${{ inputs.ksu_type }}"
 
           if [[ "${{ inputs.susfs }}" == true ]]; then
             ZIP_NAME="${ZIP_NAME}_SuSFS"
@@ -594,7 +600,7 @@ jobs:
       - name: Create GitHub Release
         run: |
           BUILD_TIME=$(date -u +"%Y%m%d_%H%M")
-          REL_NAME="${KERNEL_NAME}-AOSP13-${BUILD_TIME}"
+          REL_NAME="${KERNEL_NAME}-AOSP16-${BUILD_TIME}"
           echo "REL_NAME=${REL_NAME}" >> $GITHUB_ENV
           cd ${GITHUB_WORKSPACE}
           ZIP_FILE=$(ls *.zip)
@@ -648,7 +654,7 @@ jobs:
           | | |
           |:---|:---|
           | 📱 Device | POCO F4 GT (ingres) • Redmi K50G (ingres) |
-          | 🟠 ROM Support | AOSP Android 13 |
+          | 🟠 ROM Support | AOSP Android 16 |
           | 🖥️ Kernel Name | ${KERNEL_NAME} |
           | 🧬 Kernel Base | ${KERNEL_BASE} |
           | 🌳 Devicetree | ${DT_SOURCE} @ ${DT_BRANCH} |
