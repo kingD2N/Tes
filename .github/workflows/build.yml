@@ -48,10 +48,10 @@ on:
         default: "lineage-22.2"
 
       ksu_type:
-        description: "KernelSU Version"
+        description: "KernelSU Version (default diganti ke ReSukiSU - per 15 Sep 2026, kombinasi KernelSU-Next dev-susfs + susfs4ksu gki-android12-5.10 lagi gagal patch; ReSukiSU + susfs terbukti sukses di build referensi terbaru dari sumber kernel yang sama)"
         required: true
         type: choice
-        default: "KernelSU-Next"
+        default: "ReSukiSU"
         options:
           - None
           - Official-KernelSU
@@ -78,10 +78,10 @@ on:
         default: true
 
       susfs_commit:
-        description: "Custom commit SHA for susfs4ksu (optional; leave empty to use the latest commit on gki-android12-5.10)"
+        description: "Custom commit SHA for susfs4ksu. Default dikunci ke 85a6009 (gki-android12-5.10) - commit terakhir yang terbukti apply bersih di build referensi ingres per 15 Sep 2026. Kosongkan untuk balik ke 'latest' (bisa gagal lagi kalau upstream drift lagi)."
         required: false
         type: string
-        default: ""
+        default: "85a6009"
 
       BBG:
         description: "Add BBG support"
