@@ -1,58 +1,92 @@
-name: Compile Kernel Melt Rebase - POCO F4 GT (Ingres) - AOSP Android 16
+# Build AxionOS (LineageOS 23.2-based) for Xiaomi POCO F4 GT / Redmi K50G (ingres, SM8450)
+#
+# Requires a SELF-HOSTED runner labeled `rom-builder` (persistent disk, not
+# GitHub-hosted - a full AOSP/AxionOS tree + out/ + ccache needs ~250-400GB):
+#   - repo/git-lfs get auto-installed below if missing
+#   - 64GB+ RAM (or equivalent swap) recommended - not configured here, since
+#     that's a host-level concern on a dedicated self-hosted rig, not a
+#     per-job CI step
+#
+# Source lives OUTSIDE $GITHUB_WORKSPACE at $HOME/rom-src/axion-<device>, so:
+#   - it survives across runs regardless of actions/checkout's clean/reset
+#     behavior on $GITHUB_WORKSPACE
+#   - `repo sync` stays incremental instead of re-fetching everything each run
+#
+# Adapted from the Melt kernel CI (build.yml) conventions + the ingres
+# roomservice recipe (nganu.txt): same GH Release / ccache / release-notes
+# style, pointed at a full ROM sync+build pipeline instead of a standalone
+# kernel compile.
+
+name: Build AxionOS ROM - POCO F4 GT (Ingres)
 
 on:
   workflow_dispatch:
     inputs:
-      kernel_source:
-        description: "Kernel source repo URL for marble (Melt Kernel). Paste any git URL here to override the default."
+      device:
+        description: "Device codename"
         required: true
         type: string
-        default: "https://github.com/kingD2N/kernel_source_Melt_xiaomi_ingres"
+        default: "ingres"
 
-      kernel_branch:
-        description: "Branch on kernel_source above (independent from modules/devicetree branches below)"
+      soc:
+        description: "SoC/platform codename (dipakai untuk path kernel & device-common tree)"
         required: true
-        type: choice
-        default: "melt-rebase-4LazyGoogle"
-        options:
-          - LazyGoogle_ORI
-          - melt-rebase-4LazyGoogle
-          - melt-MIX
+        type: string
+        default: "sm8450"
 
-      modules_branch:
-        description: "Branch for the LineageOS modules repo (unaffected by kernel_source/kernel_branch above). Defaults to lineage-23.2 to match the Android 16 target of this workflow."
+      manifest_branch:
+        description: "Branch manifest AxionOS (AxionAOSP/android) - juga dipakai sebagai basis reset untuk hardware/lineage/interfaces & device/lineage/sepolicy sebelum cherry-pick"
         required: true
         type: string
         default: "lineage-23.2"
 
-      devicetree_preset:
-        description: "Pick a known devicetree source+branch pair, or Custom to use the two raw fields below. kingD2N-A16-lineage23.2 (default) tracks LineageOS 23.2 / Android 16 - confirmed the current default branch on kingD2N's devicetree repo. kingD2N-AOSP13 is the older repo/branch pair for Android 13 (lineage-20). kingD2N-generic-lineage22.2 is the earlier lineage-22.2 pairing (closer to LOS Android 15), kept for comparison/fallback."
-        required: true
-        type: choice
-        default: "kingD2N-A16-lineage23.2"
-        options:
-          - kingD2N-A16-lineage23.2
-          - kingD2N-AOSP13
-          - kingD2N-generic-lineage22.2
-          - Custom
-
-      devicetree_source:
-        description: "Devicetree source repo URL (kernel-level arch/arm64/boot/dts/vendor, not an Android device tree). Only read when devicetree_preset above is set to Custom."
-        required: true
-        type: string
-        default: "https://github.com/kingD2N/android_kernel_xiaomi_sm8450-devicetrees"
-
-      devicetree_branch:
-        description: "Branch on devicetree_source above. Only read when devicetree_preset above is set to Custom. KERNEL_BASE below always stays android12 regardless of which devicetree preset/branch you pick - ingres is permanently locked to the android12-5.10 GKI base by its Android 12 launch."
+      device_branch:
+        description: "Branch untuk device/vendor/kernel tree ingres (Ingres-Centre & Gurinbone)"
         required: true
         type: string
         default: "lineage-23.2"
+
+      packages_branch:
+        description: "Branch untuk packages GameKeys & Leds (Ingres-Centre) - beda dari device_branch, defaultnya lineage-23.0"
+        required: true
+        type: string
+        default: "lineage-23.0"
+
+      hardware_branch:
+        description: "Branch untuk hardware/xiaomi (LineageOS)"
+        required: true
+        type: string
+        default: "lineage-23.2"
+
+      include_miuicamera:
+        description: "Sertakan MIUI Camera HAL (device+vendor miuicamera-<device>, Gurinbone)"
+        required: true
+        type: boolean
+        default: true
+
+      include_dolby:
+        description: "Sertakan Dolby (hardware_dolby + packages_apps_DolbyUI, Gurinbone)"
+        required: true
+        type: boolean
+        default: true
+
+      dolby_hw_branch:
+        description: "Branch hardware_dolby"
+        required: false
+        type: string
+        default: "Dolby-Vision-2.1"
+
+      dolby_ui_branch:
+        description: "Branch packages_apps_DolbyUI"
+        required: false
+        type: string
+        default: "16.0"
 
       ksu_type:
-        description: "KernelSU Version (default diganti ke ReSukiSU - per 15 Sep 2026, kombinasi KernelSU-Next dev-susfs + susfs4ksu gki-android12-5.10 lagi gagal patch; ReSukiSU + susfs terbukti sukses di build referensi terbaru dari sumber kernel yang sama)"
+        description: "Root solution yang di-setup ke kernel in-tree (kernel/xiaomi/<soc>)"
         required: true
         type: choice
-        default: "ReSukiSU"
+        default: "KernelSU-Next"
         options:
           - None
           - Official-KernelSU
@@ -61,638 +95,374 @@ on:
           - ReSukiSU
           - SukiSUUltra
 
-      custom_name:
-        description: "kernel"
-        required: false
+      build_type:
+        description: "Build type (axion <device> <build_type> <gms_variant>)"
+        required: true
         type: choice
-        default: AOSP16-KERNEL
+        default: "userdebug"
         options:
-          - AOSP16-KERNEL
-          - AOSP13-KERNEL
-          - Melt-KERNEL
-          - MIX™-KERNEL
-          - LazyGoogle-KERNEL
+          - user
+          - userdebug
+          - eng
 
-      susfs:
-        description: "Add susfs support"
+      gms_variant:
+        description: "GMS variant (axion <device> <build_type> <gms_variant>)"
+        required: true
+        type: choice
+        default: "gms"
+        options:
+          - gms
+          - pico
+          - core
+          - full
+          - va
+
+      sync_source:
+        description: "Jalankan repo init/sync + sync tree device-specific. Matikan untuk rebuild cepat dari source yang sudah ada (butuh sync sukses minimal sekali sebelumnya)"
         required: true
         type: boolean
         default: true
 
-      susfs_commit:
-        description: "Custom commit SHA for susfs4ksu (branch gki-android12-5.10). Kosongkan (default) untuk selalu pakai commit terbaru di branch tsb. Kalau diisi, workflow sekarang otomatis fallback ke HEAD branch bila hash yang diisi tidak ditemukan atau folder kernel_patches di commit itu tidak lengkap - jadi run tidak langsung gagal keras seperti sebelumnya."
+      clean_build:
+        description: "Paksa clean build (mka clobber sebelum axion/ax) - ccache tetap dipakai"
+        required: true
+        type: boolean
+        default: false
+
+      regen_keys:
+        description: "Paksa generate ulang signing keys (gk -s) walau vendor/lineage-priv/keys sudah ada - HATI-HATI: mengganti keys memutus kontinuitas update OTA dari build sebelumnya"
+        required: true
+        type: boolean
+        default: false
+
+      ccache_update:
+        description: "Hapus ccache lama sebelum build (fresh cache)"
+        required: true
+        type: boolean
+        default: false
+
+      ccache_size:
+        description: "Ukuran maksimum ccache"
+        required: true
+        type: string
+        default: "75G"
+
+      job_count:
+        description: "Override jumlah thread untuk 'ax -br -j'. Kosongkan untuk pakai nproc otomatis"
         required: false
         type: string
         default: ""
 
-      BBG:
-        description: "Add BBG support"
-        required: true
-        type: boolean
-        default: true
-
-      rekernel_netlink:
-        description: "Add Re-Kernel support (Netlink)"
-        required: true
-        type: boolean
-        default: true
-
-      rekernel_ebpf:
-        description: "Add Re-Kernel support (eBPF)"
-        required: true
-        type: boolean
-        default: true
-
-      droidspaces:
-        description: "Add DroidSpaces support"
-        required: true
-        type: boolean
-        default: true
-
-      nomount:
-        description: "Add NoMount support (kernel VFS path redirection/injection, maxsteeel/nomount@master - auto-updates to whatever's newest on that branch each run; may conflict with susfs since both patch fs/namei.c)"
-        required: true
-        type: boolean
-        default: true
-
-      ccache_update:
-        description: "Refresh ccache (overwrite the repo cache with this build's ccache; enable when u changed configs/source or need a clean cache)"
-        required: true
-        type: boolean
-        default: true
-
-
 jobs:
-  Build_Kernel:
-    env:
-        GH_TOKEN: ${{ github.token }}
-        SOC: sm8450
-        CCACHE_KEY: ccache-ecsv3-ingres-sm8450-aosp13
-        # Public link of your Telegram group (shown as "JOIN" button in the push).
-        TG_GROUP_URL: ""
-    runs-on: ubuntu-latest
+  Build_ROM:
+    runs-on: [self-hosted, rom-builder]
+    timeout-minutes: 1440
+    concurrency:
+      group: axionos-${{ inputs.device }}-build
+      cancel-in-progress: false
     permissions:
       contents: write
-      actions: write
-      checks: read
+    defaults:
+      run:
+        shell: bash
+    env:
+      GH_TOKEN: ${{ github.token }}
+      DEVICE: ${{ inputs.device }}
+      SOC: ${{ inputs.soc }}
     steps:
       - uses: actions/checkout@v7
 
-      - name: Free up disk space
+      - name: Prepare persistent ROM workspace
         run: |
-          
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          sudo docker image prune --all --force || true
-          df -h
+          ROM_DIR="$HOME/rom-src/axion-${DEVICE}"
+          mkdir -p "$ROM_DIR" "$HOME/bin"
+          echo "ROM_DIR=$ROM_DIR" >> "$GITHUB_ENV"
+          echo "BUILD_LOG=$HOME/axion-${DEVICE}-build.log" >> "$GITHUB_ENV"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+          echo "==> Persistent source tree: $ROM_DIR"
+          df -h "$HOME"
 
-      - name: Setup SWAP
-        uses: pierotofy/set-swap-space@master
-        with:
-          swap-size-gb: 16
-
-      - name: Install build dependencies
+      - name: Install repo tool & build dependencies
         run: |
-          sudo apt update
-          sudo apt install -y \
-          bc bison flex \
-          libssl-dev \
-          libelf-dev \
-          libdw-dev \
-          build-essential \
-          lz4 \
-          git \
-          python3 \
-          curl \
-          dwarves \
-          cpio \
-          ccache \
-          zstd \
-          unzip \
-          gcc-aarch64-linux-gnu
+          if ! command -v repo >/dev/null 2>&1; then
+            curl -s https://storage.googleapis.com/git-repo-downloads/repo > "$HOME/bin/repo"
+            chmod a+x "$HOME/bin/repo"
+          fi
+          repo --version
 
-      - name: Clone Kernel Source
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison build-essential ccache curl erofs-utils flex \
+            g++-multilib gcc-multilib git git-lfs gnupg gperf imagemagick \
+            lib32readline-dev lib32z1-dev libdw-dev libelf-dev libgnutls28-dev \
+            lz4 libsdl1.2-dev libssl-dev libxml2-utils lzop pngcrush rsync \
+            schedtool squashfs-tools xsltproc xxd zip unzip zlib1g-dev \
+            python3 python-is-python3 protobuf-compiler python3-protobuf fontconfig
+
+          git lfs install --skip-repo
+
+      - name: Init & sync AxionOS manifest (${{ inputs.manifest_branch }})
+        if: ${{ inputs.sync_source }}
+        working-directory: ${{ env.ROM_DIR }}
         run: |
-          git clone --depth=1 -b ${{ inputs.kernel_branch }} ${{ inputs.kernel_source }} ${SOC}
-          git clone --depth=1 -b ${{ inputs.modules_branch }} https://github.com/LineageOS/android_kernel_xiaomi_${SOC}-modules.git ${SOC}-modules
+          set -e
+          repo init -u https://github.com/AxionAOSP/android.git -b "${{ inputs.manifest_branch }}" --git-lfs
+          repo sync -c -f --force-sync --no-tags --no-clone-bundle -j"$(nproc)" --optimized-fetch --prune
 
-          case "${{ inputs.devicetree_preset }}" in
-            "kingD2N-A16-lineage23.2")
-              DT_SOURCE="https://github.com/kingD2N/android_kernel_xiaomi_sm8450-devicetrees"
-              DT_BRANCH="lineage-23.2"
-              ;;
-            "kingD2N-AOSP13")
-              DT_SOURCE="https://github.com/kingD2N/android13_kernel_qcom_sm8450-devicetrees"
-              DT_BRANCH="lineage-20"
-              ;;
-            "kingD2N-generic-lineage22.2")
-              DT_SOURCE="https://github.com/kingD2N/android_kernel_xiaomi_sm8450-devicetrees"
-              DT_BRANCH="lineage-22.2"
-              ;;
-            "Custom")
-              DT_SOURCE="${{ inputs.devicetree_source }}"
-              DT_BRANCH="${{ inputs.devicetree_branch }}"
-              ;;
-          esac
-          echo "==> Devicetree preset '${{ inputs.devicetree_preset }}' -> ${DT_SOURCE} @ ${DT_BRANCH}"
-          echo "DT_SOURCE=${DT_SOURCE}" >> $GITHUB_ENV
-          echo "DT_BRANCH=${DT_BRANCH}" >> $GITHUB_ENV
-
-          rm -rf ${SOC}/arch/arm64/boot/dts/vendor
-          git clone --depth=1 -b "${DT_BRANCH}" "${DT_SOURCE}" ${SOC}/arch/arm64/boot/dts/vendor \
-            || git clone --depth=1 "${DT_SOURCE}" ${SOC}/arch/arm64/boot/dts/vendor
-
-      - name: Detect kernel version
+      - name: Sync device/vendor/kernel trees (Ingres-Centre & Gurinbone)
+        if: ${{ inputs.sync_source }}
+        working-directory: ${{ env.ROM_DIR }}
         run: |
+          set -e
 
-          KVERSION=$(grep -m1 '^VERSION = ' ${SOC}/Makefile | awk '{print $3}')
-          KPATCHLEVEL=$(grep -m1 '^PATCHLEVEL = ' ${SOC}/Makefile | awk '{print $3}')
-          KSUBLEVEL=$(grep -m1 '^SUBLEVEL = ' ${SOC}/Makefile | awk '{print $3}')
+          sync_repo() {
+            local url="$1" branch="$2" path="$3"
+            if [ -d "$path/.git" ]; then
+              echo "==> Update: $path (@ $branch)"
+              git -C "$path" remote set-url origin "$url"
+              git -C "$path" fetch origin "$branch" --depth=1
+              git -C "$path" checkout -B "$branch" "origin/$branch"
+              git -C "$path" reset --hard "origin/$branch"
+              git -C "$path" clean -ffdx
+            else
+              echo "==> Clone: $path (@ $branch)"
+              rm -rf "$path"
+              git clone --depth=1 -b "$branch" "$url" "$path"
+            fi
+          }
 
-          if [[ -z "$KVERSION" || -z "$KPATCHLEVEL" || -z "$KSUBLEVEL" ]]; then
-            echo "::error::Couldn't parse VERSION/PATCHLEVEL/SUBLEVEL from ${SOC}/Makefile (got '${KVERSION}.${KPATCHLEVEL}.${KSUBLEVEL}'). Has the Makefile's header format changed on this branch?"
-            exit 1
+          D="${{ inputs.device_branch }}"
+          P="${{ inputs.packages_branch }}"
+          H="${{ inputs.hardware_branch }}"
+
+          sync_repo "https://github.com/Ingres-Centre/android_device_xiaomi_${DEVICE}"         "$D" "device/xiaomi/${DEVICE}"
+          sync_repo "https://github.com/Gurinbone/android_device_xiaomi_${SOC}-common"         "$D" "device/xiaomi/${SOC}-common"
+          sync_repo "https://github.com/Gurinbone/proprietary_vendor_xiaomi_${DEVICE}"         "$D" "vendor/xiaomi/${DEVICE}"
+          sync_repo "https://github.com/Gurinbone/proprietary_vendor_xiaomi_${SOC}-common"     "$D" "vendor/xiaomi/${SOC}-common"
+          sync_repo "https://github.com/Ingres-Centre/android_kernel_xiaomi_${SOC}"            "$D" "kernel/xiaomi/${SOC}"
+          sync_repo "https://github.com/LineageOS/android_kernel_xiaomi_${SOC}-modules"        "$D" "kernel/xiaomi/${SOC}-modules"
+          sync_repo "https://github.com/Ingres-Centre/android_kernel_xiaomi_${SOC}-devicetrees" "$D" "kernel/xiaomi/${SOC}-devicetrees"
+          sync_repo "https://github.com/Ingres-Centre/android_packages_apps_gamekeys"          "$P" "packages/apps/GameKeys"
+          sync_repo "https://github.com/Ingres-Centre/android_packages_apps_leds"              "$P" "packages/apps/Leds"
+          sync_repo "https://github.com/LineageOS/android_hardware_xiaomi"                     "$H" "hardware/xiaomi"
+
+          if [[ "${{ inputs.include_miuicamera }}" == true ]]; then
+            sync_repo "https://github.com/Gurinbone/android_device_xiaomi_miuicamera-${DEVICE}" "$D" "device/xiaomi/miuicamera-${DEVICE}"
+            sync_repo "https://github.com/Gurinbone/android_vendor_xiaomi_miuicamera-${DEVICE}" "$D" "vendor/xiaomi/miuicamera-${DEVICE}"
           fi
 
-          # KERNEL_BASE intentionally stays "android12" here even though this workflow
-          # targets an AOSP Android 16 build: ingres shipped on Android 12, so per Google's
-          # GKI KMI policy it is permanently locked to the android12-5.10 kernel base -
-          # vendor .ko blobs are compiled against that ABI regardless of which Android
-          # version the ROM on top is running. Only the devicetree source and the ROM
-          # support label change for this workflow, not the GKI base.
-          KERNEL_BASE="android12-${KVERSION}.${KPATCHLEVEL}.${KSUBLEVEL}"
-          echo "==> Detected kernel version: ${KERNEL_BASE}"
-          echo "KERNEL_BASE=${KERNEL_BASE}" >> $GITHUB_ENV
-
-      - name: Download LLVM (latest stable release)
-        run: |
-          mkdir -p toolchains
-          cd toolchains
-
-          
-          LLVM_TAG=$(gh release list --repo llvm/llvm-project --exclude-drafts --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName')
-          if [[ -z "$LLVM_TAG" ]]; then
-            echo "::error::Could not determine the latest llvm/llvm-project release tag via gh CLI."
-            exit 1
-          fi
-          LLVM_VERSION="${LLVM_TAG#llvmorg-}"
-          echo "==> Latest LLVM release: ${LLVM_TAG} (version ${LLVM_VERSION})"
-          echo "LLVM_VERSION=${LLVM_VERSION}" >> $GITHUB_ENV
-
-          ASSET="LLVM-${LLVM_VERSION}-Linux-X64.tar.xz"
-          URL="https://github.com/llvm/llvm-project/releases/download/${LLVM_TAG}/${ASSET}"
-          if ! wget -q "$URL"; then
-            echo "::error::Failed to download ${URL} - ${LLVM_TAG} may not publish a Linux-X64 tarball under the expected name. Check https://github.com/llvm/llvm-project/releases/tag/${LLVM_TAG} for the actual asset name."
-            exit 1
+          if [[ "${{ inputs.include_dolby }}" == true ]]; then
+            sync_repo "https://github.com/Gurinbone/hardware_dolby"        "${{ inputs.dolby_hw_branch }}" "hardware/dolby"
+            sync_repo "https://github.com/Gurinbone/packages_apps_DolbyUI" "${{ inputs.dolby_ui_branch }}" "packages/apps/DolbyUI"
           fi
 
-          
-          mkdir llvm
-          tar -xf "${ASSET}" -C llvm --strip-components=1
-
-      
-      - name: Configure ccache dir and key
+      - name: Terapkan commit GameKeys & Leds (hardware/lineage/interfaces)
+        working-directory: ${{ env.ROM_DIR }}/hardware/lineage/interfaces
         run: |
-          echo "CCACHE_DIR=$HOME/.ccache_ingres" >> $GITHUB_ENV
-          echo "CCACHE_MAXSIZE=3G" >> $GITHUB_ENV
-          if [[ "${{ inputs.droidspaces }}" == true ]]; then
-            CCACHE_REAL_KEY=${CCACHE_KEY}-Droidspaces
-          else
-            CCACHE_REAL_KEY=${CCACHE_KEY}-none
-          fi
-          echo "CCACHE_REAL_KEY=$CCACHE_REAL_KEY" >> $GITHUB_ENV
+          set -e
+          git fetch origin "${{ inputs.manifest_branch }}"
+          git reset --hard "origin/${{ inputs.manifest_branch }}"
+          git remote remove ingres 2>/dev/null || true
+          git remote add ingres https://github.com/Ingres-Centre/android_hardware_lineage_interfaces.git
+          git fetch ingres
 
-      - name: Purge old ccache (on refresh)
-        if: ${{ inputs.ccache_update }}
-        continue-on-error: true
+          for c in fed24686e662735bcb2a5028889ce1fd51980d2c \
+                   cf431b188a7aa143b99f46e7522a295a3cb04d66 \
+                   fa0664db2da556267cb4400008d5f2f0db9091c7; do
+            if ! git cherry-pick -X theirs "$c"; then
+              echo "::error::Cherry-pick $c gagal di hardware/lineage/interfaces - cek konflik manual (kemungkinan tree lineage-23.2 sudah berubah dari basis komit ini)."
+              git cherry-pick --abort
+              exit 1
+            fi
+          done
+
+      - name: Terapkan commit GameKeys & Leds (device/lineage/sepolicy)
+        working-directory: ${{ env.ROM_DIR }}/device/lineage/sepolicy
         run: |
-          echo "Deleting old repo ccache to force a fresh save..."
-          gh cache delete "${CCACHE_REAL_KEY}-${{ runner.os }}-${{ inputs.kernel_branch }}" -R ${{ github.repository }} || echo "No old ccache to delete"
+          set -e
+          git fetch origin "${{ inputs.manifest_branch }}"
+          git reset --hard "origin/${{ inputs.manifest_branch }}"
+          git remote remove ingres 2>/dev/null || true
+          git remote add ingres https://github.com/Ingres-Centre/android_device_lineage_sepolicy.git
+          git fetch ingres
 
-      - name: Restore ccache
-        uses: actions/cache/restore@v6
-        id: ccache-restore
-        with:
-          path: ${{ env.CCACHE_DIR }}
-          key: ${{ env.CCACHE_REAL_KEY }}-${{ runner.os }}-${{ inputs.kernel_branch }}
-          restore-keys: |
-            ${{ env.CCACHE_REAL_KEY }}-${{ runner.os }}-
-            ${{ env.CCACHE_REAL_KEY }}-
+          for c in 48c5dc61da2bdee3e2cac31a707edf14174a1a2f \
+                   9319664761f6c0fb3c822dbb12350287ade8fe77 \
+                   864a5bc08a805ea412ea4221b4f915bc0c9d109c; do
+            if ! git cherry-pick -X theirs "$c"; then
+              echo "::error::Cherry-pick $c gagal di device/lineage/sepolicy - cek konflik manual (kemungkinan tree lineage-23.2 sudah berubah dari basis komit ini)."
+              git cherry-pick --abort
+              exit 1
+            fi
+          done
 
-      - name: Compile Kernel
+      - name: Integrasi root solution ke kernel in-tree (${{ inputs.ksu_type }})
+        if: ${{ inputs.ksu_type != 'None' }}
+        working-directory: ${{ env.ROM_DIR }}/kernel/xiaomi/${{ env.SOC }}
         run: |
-          CLANG_ROOT="${GITHUB_WORKSPACE}/toolchains/llvm/bin"
-          export PATH="${CLANG_ROOT}:$PATH"
-          export ARCH=arm64
-          export SUBARCH=arm64
-          export LLVM=1
-          export LLVM_IAS=1
-          export CC="${CLANG_ROOT}/clang"
-          export CXX="${CLANG_ROOT}/clang++"
-          export HOSTCC="${CLANG_ROOT}/clang"
-          export HOSTCXX="${CLANG_ROOT}/clang++"
-          export LD="${CLANG_ROOT}/ld.lld"
-          export AR="${CLANG_ROOT}/llvm-ar"
-          export NM="${CLANG_ROOT}/llvm-nm"
-          export OBJCOPY="${CLANG_ROOT}/llvm-objcopy"
-          export OBJDUMP="${CLANG_ROOT}/llvm-objdump"
-          export STRIP="${CLANG_ROOT}/llvm-strip"
-          export KBUILD_BUILD_USER="KingD2N"
-          export KBUILD_BUILD_HOST="Ingres"
-
-
-          export CCACHE_COMPILERCHECK="none"
-          export CCACHE_BASEDIR="${GITHUB_WORKSPACE}"
-          export CCACHE_NOHASHDIR="true"
-          export CCACHE_NOHARDLINK="true"
-          mkdir -p "${CCACHE_DIR}"
-          echo "sloppiness = file_stat_matches,include_file_ctime,include_file_mtime,pch_defines,file_macro,time_macros" >> "${CCACHE_DIR}/ccache.conf"
-          ccache -M "${CCACHE_MAXSIZE}"
-          ccache -o compression=true
-          echo "ccache status before build:"
-          ccache -s
-
-          if [[ -n "${{ inputs.custom_name }}" ]]; then
-            KERNEL_NAME="${{ inputs.custom_name }}"
-          else
-            KERNEL_NAME="${{ inputs.ksu_type }}"
-          fi
-
-          echo "KERNEL_NAME=${KERNEL_NAME}" >> $GITHUB_ENV
-
-          cd ${SOC}
-
+          set -e
           case "${{ inputs.ksu_type }}" in
-
-            "None")
-              ;;
-
             "Official-KernelSU")
               curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
               ;;
-
             "KowSU")
-               curl -LSs "https://raw.githubusercontent.com/KOWX712/KernelSU/main/kernel/setup.sh" | bash -s master
+              curl -LSs "https://raw.githubusercontent.com/KOWX712/KernelSU/main/kernel/setup.sh" | bash -s master
               ;;
-
             "KernelSU-Next")
-              if [[ "${{ inputs.susfs }}" == true ]]; then
-                curl -LSs "https://raw.githubusercontent.com/pershoot/KernelSU-Next/refs/heads/dev-susfs/kernel/setup.sh" | bash -s dev-susfs
-              else
-                curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s dev
-              fi
+              curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s dev
               ;;
-
             "ReSukiSU")
               curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
               ;;
-
             "SukiSUUltra")
               curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
               ;;
           esac
 
-          if [[ "${{ inputs.susfs }}" == true ]]; then
-
-            # --single-branch penting: tanpa ini, `git checkout <short-hash>` di bawah
-            # bisa "nyasar" ke commit dari branch lain di repo susfs4ksu yang sama
-            # (mis. gki-android13-5.15) yang path patch-nya beda nama, dan itu persis
-            # penyebab error "cp: cannot stat ...50_add_susfs_in_gki-android12-5.10.patch"
-            # yang muncul di run sebelumnya.
-            git clone -b gki-android12-5.10 --single-branch https://gitlab.com/simonpunk/susfs4ksu.git susfs
-            cd susfs
-
-            PATCH_FILE="kernel_patches/50_add_susfs_in_gki-android12-5.10.patch"
-
-            if [[ -n "${{ inputs.susfs_commit }}" ]]; then
-              echo "==> SUSFS: pinning to custom commit ${{ inputs.susfs_commit }}"
-              if ! git checkout "${{ inputs.susfs_commit }}" 2>/dev/null; then
-                echo "::warning::Commit '${{ inputs.susfs_commit }}' tidak ditemukan di branch gki-android12-5.10. Fallback ke HEAD branch (latest)."
-                git checkout gki-android12-5.10
-              fi
-            else
-              echo "==> SUSFS: using latest commit on branch gki-android12-5.10"
-            fi
-
-            SUSFS_COMMIT=$(git rev-parse --short HEAD)
-            echo "==> SUSFS: checked out commit ${SUSFS_COMMIT}"
-
-            if [[ ! -f "$PATCH_FILE" ]]; then
-              echo "::warning::'$PATCH_FILE' tidak ada di commit ${SUSFS_COMMIT}. Isi kernel_patches/ di commit ini:"
-              ls -la kernel_patches/ 2>&1 || echo "(folder kernel_patches/ sendiri tidak ada di commit ini)"
-              echo "==> Fallback: checkout HEAD branch gki-android12-5.10 dan coba lagi..."
-              git checkout gki-android12-5.10
-              SUSFS_COMMIT=$(git rev-parse --short HEAD)
-              echo "==> SUSFS: pakai HEAD (${SUSFS_COMMIT}) sebagai fallback"
-              if [[ ! -f "$PATCH_FILE" ]]; then
-                echo "::error::'$PATCH_FILE' tetap tidak ditemukan bahkan di HEAD branch gki-android12-5.10 (${SUSFS_COMMIT}). Struktur repo susfs4ksu kemungkinan berubah - cek manual: https://gitlab.com/simonpunk/susfs4ksu/-/tree/gki-android12-5.10/kernel_patches"
-                exit 1
-              fi
-            fi
-
-            echo "SUSFS_COMMIT=${SUSFS_COMMIT}" >> $GITHUB_ENV
-            cp "./$PATCH_FILE" ..
-            cp ./kernel_patches/fs/* ../fs/
-            cp ./kernel_patches/include/linux/* ../include/linux/
-            cd ..
-            if ! patch -p1 < 50_add_susfs_in_gki-android12-5.10.patch; then
-              echo "::error::SUSFS patch gagal apply bersih ke tree kernel ini. Kemungkinan besar penyebabnya: KernelSU-Next (dev-susfs, selalu tarik commit terbaru) dan susfs4ksu (branch gki-android12-5.10, juga bisa 'latest' kalau susfs_commit dikosongkan) sudah tidak sinkron satu sama lain. Coba isi input 'susfs_commit' dengan commit susfs4ksu yang lebih lama, atau cek riwayat commit pershoot/KernelSU-Next branch dev-susfs untuk versi yang sezaman."
-              echo "::group::Isi file .rej (hunk yang gagal, untuk debug)"
-              find . -name "*.rej" -print -exec echo "--- {} ---" \; -exec cat {} \;
-              echo "::endgroup::"
-              exit 1
-            fi
-            echo "CONFIG_KSU_SUSFS=y" >> arch/arm64/configs/gki_defconfig
-            echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> arch/arm64/configs/gki_defconfig
-            echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> arch/arm64/configs/gki_defconfig
-            echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> arch/arm64/configs/gki_defconfig
-            echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> arch/arm64/configs/gki_defconfig
-            echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> arch/arm64/configs/gki_defconfig
-            echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> arch/arm64/configs/gki_defconfig
-            echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> arch/arm64/configs/gki_defconfig
-            echo "CONFIG_KSU_SUSFS_SUS_MAP=y" >> arch/arm64/configs/gki_defconfig
-          fi
-
-          if [[ "${{ inputs.nomount }}" == true ]]; then
-            echo "::group::NoMount integration"
-            if [[ "${{ inputs.susfs }}" == true ]]; then
-              echo "::warning::susfs and nomount are both enabled - susfs's SUS_KSTAT patches fs/stat.c, which nomount's own VFS hooks may also touch. If anything below fails, try disabling one to isolate it."
-            fi
-
-
-            NOMOUNT_COMMIT=$(git ls-remote https://github.com/maxsteeel/nomount.git refs/heads/master | cut -f1 | cut -c1-7)
-            if [[ -z "$NOMOUNT_COMMIT" ]]; then
-              echo "::warning::Could not resolve maxsteeel/nomount's master branch HEAD via git ls-remote - continuing anyway, but the release notes won't show a commit hash for this run."
-              NOMOUNT_COMMIT="unknown"
-            fi
-            echo "NOMOUNT_COMMIT=${NOMOUNT_COMMIT}" >> $GITHUB_ENV
-            echo "==> NoMount: using maxsteeel/nomount@master (${NOMOUNT_COMMIT})"
-
-            curl -LSs "https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/master/kernel/setup.sh" | bash -s master
-            echo "CONFIG_NOMOUNT=y" >> arch/arm64/configs/gki_defconfig
-            echo "::endgroup::"
-          fi
-
-          if [[ "${{ inputs.BBG }}" == true ]]; then
-            wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
-            echo "CONFIG_BBG=y" >> arch/arm64/configs/gki_defconfig
-            sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
-          fi
-
-          if [[ "${{ inputs.rekernel_netlink }}" == true ]]; then
-            git clone --depth=1 https://github.com/Sakion-Team/Re-Kernel.git rekernel-src
-            bash rekernel-src/Integrate/patches.sh
-            echo "CONFIG_REKERNEL=y" >> arch/arm64/configs/gki_defconfig
-            echo "CONFIG_REKERNEL_NETWORK=y" >> arch/arm64/configs/gki_defconfig
-          fi
-
-          if [[ "${{ inputs.rekernel_ebpf }}" == true ]]; then
-            
-            echo "CONFIG_BPF_SYSCALL=y" >> arch/arm64/configs/gki_defconfig
-            echo "CONFIG_BPF_JIT=y" >> arch/arm64/configs/gki_defconfig
-            echo "CONFIG_CGROUP_BPF=y" >> arch/arm64/configs/gki_defconfig
-            echo "CONFIG_BPF_EVENTS=y" >> arch/arm64/configs/gki_defconfig
-            echo "CONFIG_KPROBES=y" >> arch/arm64/configs/gki_defconfig
-            echo "CONFIG_KPROBE_EVENTS=y" >> arch/arm64/configs/gki_defconfig
-            echo "CONFIG_UPROBE_EVENTS=y" >> arch/arm64/configs/gki_defconfig
-            echo "CONFIG_NET_CLS_ACT=y" >> arch/arm64/configs/gki_defconfig
-            echo "CONFIG_NET_CLS_BPF=y" >> arch/arm64/configs/gki_defconfig
-            echo "CONFIG_NET_ACT_BPF=y" >> arch/arm64/configs/gki_defconfig
-            echo "CONFIG_NET_SCH_INGRESS=y" >> arch/arm64/configs/gki_defconfig
-            echo "CONFIG_DEBUG_INFO=y" >> arch/arm64/configs/gki_defconfig
-            echo "CONFIG_DEBUG_INFO_BTF=y" >> arch/arm64/configs/gki_defconfig
-            echo "CONFIG_DEBUG_INFO_BTF_MODULES=y" >> arch/arm64/configs/gki_defconfig
-            echo "==> Re-Kernel eBPF selected; will build after the kernel Image is ready."
-          fi
-
-          DROIDSPACES_CONFIG=""
-          if [[ "${{ inputs.droidspaces }}" == true ]]; then
-
-            apply_droidspaces_patch() {
-              local patch_file="$1" label="$2"
-              if patch -p1 -N --fuzz=0 --dry-run --silent < "$patch_file" > /dev/null 2>&1; then
-                patch -p1 -N --fuzz=0 < "$patch_file"
-                echo "==> DroidSpaces ${label}: applied."
-                return 0
-              elif patch -p1 -R --fuzz=0 --dry-run --silent < "$patch_file" > /dev/null 2>&1; then
-                echo "==> DroidSpaces ${label}: already present natively on this branch (confirmed via reverse-check) - not re-applying."
-                return 0
-              else
-                echo "::warning::DroidSpaces ${label} doesn't apply cleanly in either direction - can't confirm the kABI fix is actually present on this tree."
-                return 1
-              fi
-            }
-
-            DROIDSPACES_SAFE=true
-
-            curl -sLo patch-for-below-6.12.patch https://raw.githubusercontent.com/ravindu644/Droidspaces-OSS/refs/heads/main/Documentation/resources/kernel-patches/GKI/below-kernel-6.12/001.GKI-below-6.12-fix_sysvipc_kabi_6_7_8.patch
-            apply_droidspaces_patch patch-for-below-6.12.patch "patch 001 (sysvipc kabi fix)" || DROIDSPACES_SAFE=false
-
-            curl -sLo patch-for-5.10-or-lower.patch https://raw.githubusercontent.com/ravindu644/Droidspaces-OSS/refs/heads/main/Documentation/resources/kernel-patches/GKI/below-kernel-6.12/002.5.10_or_lower_use_android_abi_padding_for_posix_mqueue.patch
-            apply_droidspaces_patch patch-for-5.10-or-lower.patch "patch 002 (posix_mqueue abi padding)" || DROIDSPACES_SAFE=false
-
-            if [[ "$DROIDSPACES_SAFE" == true ]]; then
-              if [[ -f "${GITHUB_WORKSPACE}/configs/droidspaces-gki.config" ]]; then
-                cp ${GITHUB_WORKSPACE}/configs/droidspaces-gki.config arch/arm64/configs/vendor/droidspaces.config
-                DROIDSPACES_CONFIG="vendor/droidspaces.config"
-              else
-                echo "::warning::configs/droidspaces-gki.config not found in this repo's root - DroidSpaces config fragment not applied (nothing to enable it with). Add that file to the repo (see ravindu644/Droidspaces-OSS 'Configuring GKI Kernels' docs) to actually turn DroidSpaces on."
-              fi
-            else
-              echo "::warning::Skipping the DroidSpaces config fragment entirely this run - at least one required kABI patch could not be confirmed. Enabling CONFIG_SYSVIPC/CONFIG_IPC_NS/CONFIG_POSIX_MQUEUE without it risks a bootloop per DroidSpaces-OSS's own docs, so this run won't have working DroidSpaces support."
-            fi
-          fi
-
-          echo "-${KERNEL_NAME}-${{ github.actor }}" > .scmversion
-
-          echo "CONFIG_TMPFS_XATTR=y" >> arch/arm64/configs/gki_defconfig
-
-          make O=out gki_defconfig vendor/waipio_GKI.config vendor/xiaomi_GKI.config vendor/ingres_GKI.config vendor/debugfs.config ${DROIDSPACES_CONFIG}
-
-          echo "::group::Sanity-check defconfig (savedefconfig)"
-
-          make O=out savedefconfig
-          cp out/defconfig "${GITHUB_WORKSPACE}/resolved_defconfig.txt"
-
-          echo "--- Cek symbol kunci ingres / tuning gaming tetap ke-resolve ---"
-          for cfg in \
-            CONFIG_ARCH_QCOM \
-            CONFIG_ARCH_WAIPIO \
-            CONFIG_SCHED_WALT \
-            CONFIG_QCOM_KGSL \
-            CONFIG_BINDER_PRIO \
-            CONFIG_MQ_IOSCHED_KYBER \
-            CONFIG_MQ_IOSCHED_DEADLINE \
-            CONFIG_HZ_500 \
-            CONFIG_KSU_SUSFS \
-            CONFIG_BBG \
-            CONFIG_REKERNEL \
-            CONFIG_NOMOUNT \
-          ; do
-            hit=$(grep "^${cfg}=" out/defconfig || true)
-            if [[ -n "$hit" ]]; then
-              echo "✅ ${hit}"
-            else
-              echo "⚠️  ${cfg} tidak ada di hasil resolve (dependency belum kepenuhi, atau symbol memang gak ada di tree ini - cek manual kalau ini config yang kamu harap ada)"
-            fi
-          done
-          echo "::endgroup::"
-
-          
-          make -j$(nproc) O=out CC="ccache ${CLANG_ROOT}/clang" HOSTCC="ccache ${CLANG_ROOT}/clang" Image
-
-          echo "ccache status after build:"
-          ccache -s
-
-      - name: Save ccache
-        if: ${{ always() && steps.ccache-restore.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@v6
-        with:
-          path: ${{ env.CCACHE_DIR }}
-          key: ${{ env.CCACHE_REAL_KEY }}-${{ runner.os }}-${{ inputs.kernel_branch }}
-
-      - name: Upload resolved defconfig (debug artifact)
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: resolved-defconfig-${{ inputs.ksu_type }}
-          path: resolved_defconfig.txt
-          if-no-files-found: warn
-
-      - name: Build Re-Kernel (eBPF)
-        if: ${{ inputs.rekernel_ebpf }}
+      - name: Build AxionOS ROM
+        working-directory: ${{ env.ROM_DIR }}
         run: |
           set -e
+          date +%s > .ci_build_marker
 
-          
-          mkdir -p rekernel-ebpf-build
-          cd rekernel-ebpf-build
-
-          
-          curl -sSL -o bpftool.tar.gz \
-            https://github.com/libbpf/bpftool/releases/download/v7.5.0/bpftool-v7.5.0-amd64.tar.gz
-          mkdir -p bpftool-bin
-          tar -xzf bpftool.tar.gz -C bpftool-bin
-          chmod +x bpftool-bin/bpftool
-
-          wget -q https://dl.google.com/android/repository/android-ndk-r27d-linux.zip
-          unzip -q android-ndk-r27d-linux.zip
-
-          # ---- Fetch only the eBPF-Source subfolder from Re-Kernel ----
-          git clone --depth=1 --filter=blob:none --sparse \
-            https://github.com/Sakion-Team/Re-Kernel.git rekernel-ebpf-src
-          cd rekernel-ebpf-src
-          git sparse-checkout set eBPF-Source
-          cd eBPF-Source
-
-
-          "${GITHUB_WORKSPACE}/rekernel-ebpf-build/bpftool-bin/bpftool" btf dump file \
-            "${GITHUB_WORKSPACE}/${SOC}/out/vmlinux" format c > include/vmlinux.h
-
-          NDK_PATH="${GITHUB_WORKSPACE}/rekernel-ebpf-build/android-ndk-r27d"
-
-          if ! make ARCH=aarch64 API=35 NDK_PATH="${NDK_PATH}"; then
-            echo "::warning::Re-Kernel eBPF build failed with plain vmlinux.h — retrying with EXTRA_BPF_CFLAGS=-DRK_DEFINE_BINDER_TYPES (binder structs may be missing from our BTF dump)."
-            make clean
-            make ARCH=aarch64 API=35 NDK_PATH="${NDK_PATH}" EXTRA_BPF_CFLAGS=-DRK_DEFINE_BINDER_TYPES
+          if [[ "${{ inputs.ccache_update }}" == true ]]; then
+            echo "==> Membersihkan ccache lama..."
+            rm -rf "$HOME/.ccache-axion-${DEVICE}"
           fi
 
-          mkdir -p "${GITHUB_WORKSPACE}/rekernel-ebpf-out"
-          cp out/rekernel.bpf.o "${GITHUB_WORKSPACE}/rekernel-ebpf-out/"
-          cp out/rekerneld_aarch64 "${GITHUB_WORKSPACE}/rekernel-ebpf-out/"
+          export USE_CCACHE=1
+          export CCACHE_EXEC="$(command -v ccache)"
+          export CCACHE_DIR="$HOME/.ccache-axion-${DEVICE}"
+          export CCACHE_COMPILERCHECK="none"
+          export CCACHE_BASEDIR="${ROM_DIR}"
+          export CCACHE_NOHASHDIR="true"
+          export CCACHE_NOHARDLINK="true"
+          mkdir -p "$CCACHE_DIR"
+          SLOPPINESS_LINE="sloppiness = file_stat_matches,include_file_ctime,include_file_mtime,pch_defines,file_macro,time_macros"
+          grep -qxF "$SLOPPINESS_LINE" "${CCACHE_DIR}/ccache.conf" 2>/dev/null || echo "$SLOPPINESS_LINE" >> "${CCACHE_DIR}/ccache.conf"
+          ccache -M "${{ inputs.ccache_size }}"
+          ccache -o compression=true
+          echo "ccache status sebelum build:"
+          ccache -s
 
-      - name: Make AnyKernel3
+          source build/envsetup.sh
+
+          KEY_DIR="vendor/lineage-priv/keys"
+          if [[ "${{ inputs.regen_keys }}" == true ]] || [ ! -d "$KEY_DIR" ] || [ -z "$(ls -A "$KEY_DIR" 2>/dev/null)" ]; then
+            echo "==> Generating signing keys ($KEY_DIR)"
+            gk -s
+          else
+            echo "==> Signing keys sudah ada di $KEY_DIR, dipertahankan (set regen_keys: true untuk generate ulang)"
+          fi
+
+          if [[ "${{ inputs.clean_build }}" == true ]]; then
+            echo "==> clean_build aktif - menjalankan mka clobber"
+            mka clobber || rm -rf out
+          fi
+
+          axion "${DEVICE}" "${{ inputs.build_type }}" "${{ inputs.gms_variant }}"
+
+          JOBS="${{ inputs.job_count }}"
+          [[ -z "$JOBS" ]] && JOBS="$(nproc)"
+          echo "==> Building dengan -j${JOBS}"
+
+          set +e
+          ax -br -j"${JOBS}" 2>&1 | tee "$BUILD_LOG"
+          BUILD_STATUS=${PIPESTATUS[0]}
+          set -e
+
+          echo "ccache status setelah build:"
+          ccache -s
+
+          exit "$BUILD_STATUS"
+
+      - name: Cari output ROM hasil build
+        id: locate
+        if: always()
+        working-directory: ${{ env.ROM_DIR }}
         run: |
-          ZIP_NAME="${KERNEL_NAME}_AOSP16_${{ inputs.ksu_type }}"
-
-          if [[ "${{ inputs.susfs }}" == true ]]; then
-            ZIP_NAME="${ZIP_NAME}_SuSFS"
+          OUT_DIR="out/target/product/${DEVICE}"
+          if [ ! -d "$OUT_DIR" ]; then
+            echo "::error::Direktori output $OUT_DIR tidak ditemukan - build kemungkinan gagal sebelum tahap packaging."
+            exit 1
           fi
 
-          if [[ "${{ inputs.nomount }}" == true ]]; then
-            ZIP_NAME="${ZIP_NAME}_NoMount"
+          ROM_ZIP=$(find "$OUT_DIR" -maxdepth 1 -type f -iname "*.zip" -newer ".ci_build_marker" \
+                      ! -iname "*target_files*" ! -iname "*ota*" ! -iname "*super_empty*" \
+                      | sort | head -n1)
+
+          if [ -z "$ROM_ZIP" ]; then
+            echo "::error::Tidak ada file .zip baru ditemukan di $OUT_DIR - build kemungkinan gagal sebelum 'ax -br' selesai membungkus ROM."
+            echo "Isi $OUT_DIR (6 file terbaru):"
+            ls -lt "$OUT_DIR" | head -n 6 || true
+            exit 1
           fi
 
-          ZIP_NAME="${ZIP_NAME}_$(date -u +"%Y%m%d_%H%M")"
-          git clone https://github.com/kingD2N/AnyKernel3.git
+          echo "==> ROM zip ditemukan: $ROM_ZIP"
+          ROM_SHA256=$(sha256sum "$ROM_ZIP" | awk '{print $1}')
 
-          cp ${SOC}/out/arch/arm64/boot/Image AnyKernel3/Image
-          cp ${SOC}/out/arch/arm64/boot/Image ./Image
-          cd AnyKernel3
+          {
+            echo "rom_zip=$ROM_ZIP"
+            echo "rom_zip_name=$(basename "$ROM_ZIP")"
+            echo "rom_sha256=$ROM_SHA256"
+            echo "out_dir=$OUT_DIR"
+          } >> "$GITHUB_OUTPUT"
 
-          zip -r9 ../"${ZIP_NAME}.zip" * -x .git
-
-      - name: Create GitHub Release
+      - name: Siapkan log build untuk diupload (jika gagal)
+        if: failure()
         run: |
+          if [ -f "$BUILD_LOG" ]; then
+            tail -n 3000 "$BUILD_LOG" > "${BUILD_LOG}.tail"
+          else
+            echo "Log build tidak ditemukan di $BUILD_LOG" > "${BUILD_LOG}.tail"
+          fi
+
+      - name: Upload log build (jika gagal)
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: axionos-${{ inputs.device }}-build-log
+          path: ${{ env.BUILD_LOG }}.tail
+          if-no-files-found: warn
+
+      - name: Buat GitHub Release
+        if: success()
+        working-directory: ${{ env.ROM_DIR }}
+        run: |
+          set -e
+          OUT_DIR="${{ steps.locate.outputs.out_dir }}"
+          ROM_ZIP="${{ steps.locate.outputs.rom_zip }}"
+          ROM_SHA256="${{ steps.locate.outputs.rom_sha256 }}"
           BUILD_TIME=$(date -u +"%Y%m%d_%H%M")
-          REL_NAME="${KERNEL_NAME}-AOSP16-${BUILD_TIME}"
-          echo "REL_NAME=${REL_NAME}" >> $GITHUB_ENV
-          cd ${GITHUB_WORKSPACE}
-          ZIP_FILE=$(ls *.zip)
+          REL_NAME="AxionOS-${DEVICE}-${{ inputs.build_type }}-${{ inputs.gms_variant }}-${BUILD_TIME}"
 
-          ASSETS=("${ZIP_FILE}")
-          if [[ "${{ inputs.rekernel_ebpf }}" == true ]]; then
-            ASSETS+=("rekernel-ebpf-out/rekernel.bpf.o" "rekernel-ebpf-out/rekerneld_aarch64")
-          fi
+          ASSETS=("$ROM_ZIP")
+          for img in boot.img dtbo.img vendor_boot.img vendor_kernel_boot.img; do
+            [ -f "$OUT_DIR/$img" ] && ASSETS+=("$OUT_DIR/$img")
+          done
 
-          if [[ "${{ inputs.susfs }}" == true ]]; then
-            susfs_checkbox="Supported (susfs4ksu@${SUSFS_COMMIT})"
-          else
-            susfs_checkbox="Unsupported"
-          fi
-
-          if [[ "${{ inputs.BBG }}" == true ]]; then
-            bbg_checkbox="Supported"
-          else
-            bbg_checkbox="Unsupported"
-          fi
-
-          if [[ "${{ inputs.rekernel_netlink }}" == true ]]; then
-            rekernel_netlink_checkbox="Supported"
-          else
-            rekernel_netlink_checkbox="Unsupported"
-          fi
-
-          if [[ "${{ inputs.rekernel_ebpf }}" == true ]]; then
-            rekernel_ebpf_checkbox="Supported (daemon+prog attached as release assets)"
-          else
-            rekernel_ebpf_checkbox="Unsupported"
-          fi
-
-          if [[ "${{ inputs.droidspaces }}" == true ]]; then
-            droidspaces_checkbox="Supported"
-          else
-            droidspaces_checkbox="Unsupported"
-          fi
-
-          if [[ "${{ inputs.nomount }}" == true ]]; then
-            nomount_checkbox="Supported (maxsteeel/nomount@master@${NOMOUNT_COMMIT})"
-          else
-            nomount_checkbox="Unsupported"
-          fi
+          dolby_status="Tidak disertakan"
+          [[ "${{ inputs.include_dolby }}" == true ]] && dolby_status="Disertakan (hardware_dolby@${{ inputs.dolby_hw_branch }}, DolbyUI@${{ inputs.dolby_ui_branch }})"
+          miuicamera_status="Tidak disertakan"
+          [[ "${{ inputs.include_miuicamera }}" == true ]] && miuicamera_status="Disertakan"
 
           cat > release_notes.md << NOTES_EOF
           #
 
-          <img width="512" height="279" alt="image_0c69b253-1d7c-4fda-9f53-08ba18f46a10" src="https://github.com/user-attachments/assets/ba10704d-00c8-45d1-bde0-bd8bdb3618d2" />
-
           | | |
           |:---|:---|
-          | 📱 Device | POCO F4 GT (ingres) • Redmi K50G (ingres) |
-          | 🟠 ROM Support | AOSP Android 16 |
-          | 🖥️ Kernel Name | ${KERNEL_NAME} |
-          | 🧬 Kernel Base | ${KERNEL_BASE} |
-          | 🌳 Devicetree | ${DT_SOURCE} @ ${DT_BRANCH} |
-          | 🛠️ Build Scope | ZIP |
-          | 📦 Source | ${{ inputs.kernel_source }} |
-          | ⚔️ Kernel branch | ${{ inputs.kernel_branch }} |
-          | 💻 KSU Manager type | ${{ inputs.ksu_type }} |
-          | 🔧 SuSFS Version | ${susfs_checkbox} |
-          | ⚙️ BBG Patch | ${bbg_checkbox} |
-          | ⚙️ Re-Kernel (Netlink) | ${rekernel_netlink_checkbox} |
-          | ⚙️ Re-Kernel (eBPF) | ${rekernel_ebpf_checkbox} |
-          | 🧩 DroidSpaces | ${droidspaces_checkbox} |
-          | 🗂️ NoMount | ${nomount_checkbox} |
-          | 🔨 Compiler | LLVM/Clang ${LLVM_VERSION} Official |
+          | 📱 Device | POCO F4 GT (${DEVICE}) • Redmi K50G (${DEVICE}) |
+          | 🟠 ROM | AxionOS |
+          | 🌿 Manifest branch | ${{ inputs.manifest_branch }} |
+          | 🌿 Device/vendor/kernel branch | ${{ inputs.device_branch }} |
+          | 🌿 GameKeys/Leds branch | ${{ inputs.packages_branch }} |
+          | 🧩 Build type | ${{ inputs.build_type }} |
+          | 🔧 Variant | ${{ inputs.gms_variant }} |
+          | 💻 Root solution | ${{ inputs.ksu_type }} |
+          | 🎧 Dolby | ${dolby_status} |
+          | 📷 MIUI Camera HAL | ${miuicamera_status} |
+          | 🧬 SoC | ${SOC} |
+          | 🔐 SHA256 | \`${ROM_SHA256}\` |
 
           ---
           NOTES_EOF
