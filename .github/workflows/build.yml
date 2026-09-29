@@ -164,7 +164,9 @@ jobs:
     runs-on: [self-hosted, rom-builder]
     timeout-minutes: 1440
     concurrency:
-      group: axionos-${{ inputs.device }}-build
+      # github.workflow disertakan supaya run dari workflow file BERBEDA (mis.
+      # versi lama tanpa "+ Kernel Melt") tidak ikut mengantre di group yang sama
+      group: ${{ github.workflow }}-axionos-${{ inputs.device }}-build
       cancel-in-progress: false
     permissions:
       contents: write
