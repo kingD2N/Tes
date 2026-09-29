@@ -1,4 +1,17 @@
-name: Build AxionOS Vanilla ROM - POCO F4 GT (Ingres, GitHub-hosted attempt)
+# Build AxionOS (LineageOS 23.2-based) untuk Xiaomi POCO F4 GT / Redmi K50G (ingres, SM8450)
+# dengan kernel Melt (kingD2N/kernel_source_Melt_xiaomi_ingres)
+#
+# Requires a SELF-HOSTED runner labeled `rom-builder` (persistent disk, bukan
+# GitHub-hosted - full AOSP/AxionOS tree + out/ + ccache butuh ~250-400GB):
+#   - repo/git-lfs auto-terinstall di bawah jika belum ada
+#   - 64GB+ RAM (atau swap setara) direkomendasikan - tidak dikonfigurasi di sini
+#     karena itu urusan host self-hosted rig, bukan per-job CI step
+#
+# Source di LUAR $GITHUB_WORKSPACE di $HOME/rom-src/axion-<device>, supaya:
+#   - bertahan antar run terlepas dari behavior clean/reset actions/checkout
+#   - `repo sync` tetap incremental, tidak re-fetch semuanya tiap run
+
+name: Build AxionOS ROM - POCO F4 GT (Ingres) + Kernel Melt
 
 on:
   workflow_dispatch:
@@ -16,58 +29,70 @@ on:
         default: "sm8450"
 
       manifest_branch:
-        description: "Branch manifest AxionOS (AxionAOSP/android) - juga basis reset hardware/lineage/interfaces & device/lineage/sepolicy"
+        description: "Branch manifest AxionOS (AxionAOSP/android) - juga dipakai sebagai basis reset untuk hardware/lineage/interfaces & device/lineage/sepolicy sebelum cherry-pick"
         required: true
         type: string
         default: "lineage-23.2"
 
       device_branch:
-        description: "Branch device/vendor/kernel tree ingres (Ingres-Centre & Gurinbone)"
+        description: "Branch untuk device/vendor tree ingres (Ingres-Centre & Gurinbone)"
         required: true
         type: string
         default: "lineage-23.2"
 
+      kernel_repo:
+        description: "URL repo kernel Melt ingres (full source, di-clone ke kernel/xiaomi/<soc>)"
+        required: true
+        type: string
+        default: "https://github.com/kingD2N/kernel_source_Melt_xiaomi_ingres"
+
+      kernel_branch:
+        description: "Branch kernel Melt"
+        required: true
+        type: string
+        default: "main"
+
       packages_branch:
-        description: "Branch packages GameKeys & Leds (Ingres-Centre)"
+        description: "Branch untuk packages GameKeys & Leds (Ingres-Centre) - beda dari device_branch, defaultnya lineage-23.0"
         required: true
         type: string
         default: "lineage-23.0"
 
       hardware_branch:
-        description: "Branch hardware/xiaomi (LineageOS)"
+        description: "Branch untuk hardware/xiaomi (LineageOS)"
         required: true
         type: string
         default: "lineage-23.2"
 
       include_miuicamera:
-        description: "Sertakan MIUI Camera HAL - default MATI di sini biar sync setipis mungkin"
+        description: "Sertakan MIUI Camera HAL (device+vendor miuicamera-<device>, Gurinbone)"
         required: true
         type: boolean
-        default: false
+        default: true
 
       include_dolby:
-        description: "Sertakan Dolby - default MATI di sini biar sync setipis mungkin"
+        description: "Sertakan Dolby (hardware_dolby + packages_apps_DolbyUI, Gurinbone)"
         required: true
         type: boolean
-        default: false
+        default: true
 
       dolby_hw_branch:
-        description: "Branch hardware_dolby (kalau include_dolby diaktifkan)"
+        description: "Branch hardware_dolby"
         required: false
         type: string
         default: "Dolby-Vision-2.1"
 
       dolby_ui_branch:
-        description: "Branch packages_apps_DolbyUI (kalau include_dolby diaktifkan)"
+        description: "Branch packages_apps_DolbyUI"
         required: false
         type: string
         default: "16.0"
 
       ksu_type:
-        description: "Root solution yang di-setup ke kernel in-tree"
+        description: "Root solution yang di-setup ke kernel in-tree (kernel/xiaomi/<soc>). Melt sering sudah embed KSU - pakai None kalau sudah built-in"
         required: true
         type: choice
-        default: "KernelSU-Next"
+        default: "None"
         options:
           - None
           - Official-KernelSU
@@ -87,16 +112,46 @@ on:
           - eng
 
       gms_variant:
-        description: "GMS variant - default 'va' (vanilla, tanpa Google apps) sesuai yang diminta"
+        description: "GMS variant (axion <device> <build_type> <gms_variant>)"
         required: true
         type: choice
-        default: "va"
+        default: "gms"
         options:
-          - va
-          - core
-          - pico
           - gms
+          - pico
+          - core
           - full
+          - va
+
+      sync_source:
+        description: "Jalankan repo init/sync + sync tree device-specific. Matikan untuk rebuild cepat dari source yang sudah ada (butuh sync sukses minimal sekali sebelumnya)"
+        required: true
+        type: boolean
+        default: true
+
+      clean_build:
+        description: "Paksa clean build (mka clobber sebelum axion/ax) - ccache tetap dipakai"
+        required: true
+        type: boolean
+        default: false
+
+      regen_keys:
+        description: "Paksa generate ulang signing keys (gk -s) walau vendor/lineage-priv/keys sudah ada - HATI-HATI: mengganti keys memutus kontinuitas update OTA dari build sebelumnya"
+        required: true
+        type: boolean
+        default: false
+
+      ccache_update:
+        description: "Hapus ccache lama sebelum build (fresh cache)"
+        required: true
+        type: boolean
+        default: false
+
+      ccache_size:
+        description: "Ukuran maksimum ccache"
+        required: true
+        type: string
+        default: "75G"
 
       job_count:
         description: "Override jumlah thread untuk 'ax -br -j'. Kosongkan untuk pakai nproc otomatis"
@@ -106,10 +161,10 @@ on:
 
 jobs:
   Build_ROM:
-    runs-on: ubuntu-latest
-    timeout-minutes: 350
+    runs-on: [self-hosted, rom-builder]
+    timeout-minutes: 1440
     concurrency:
-      group: axionos-vanilla-${{ inputs.device }}-hosted
+      group: axionos-${{ inputs.device }}-build
       cancel-in-progress: false
     permissions:
       contents: write
@@ -123,32 +178,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Maximize disk space (hapus prebundle yang gak kepake)
+      - name: Prepare persistent ROM workspace
         run: |
-          echo "==> Disk sebelum cleanup:"
-          df -h /
-
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-            /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
-            /usr/local/lib/node_modules /usr/share/swift /opt/az \
-            "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}" \
-            /usr/local/.ghcup /usr/lib/jvm 2>/dev/null || true
-
-          sudo docker image prune --all --force >/dev/null 2>&1 || true
-          sudo apt-get autoremove -y >/dev/null 2>&1 || true
-          sudo apt-get autoclean -y >/dev/null 2>&1 || true
-          sudo rm -rf /var/lib/apt/lists/* 2>/dev/null || true
-
-          echo "==> Disk setelah cleanup:"
-          df -h /
-
-      - name: Prepare workspace
-        run: |
-          ROM_DIR="$GITHUB_WORKSPACE/rom"
+          ROM_DIR="$HOME/rom-src/axion-${DEVICE}"
           mkdir -p "$ROM_DIR" "$HOME/bin"
           echo "ROM_DIR=$ROM_DIR" >> "$GITHUB_ENV"
           echo "BUILD_LOG=$HOME/axion-${DEVICE}-build.log" >> "$GITHUB_ENV"
           echo "$HOME/bin" >> "$GITHUB_PATH"
+          echo "==> Persistent source tree: $ROM_DIR"
+          df -h "$HOME"
 
       - name: Install repo tool & build dependencies
         run: |
@@ -170,41 +208,55 @@ jobs:
           git lfs install --skip-repo
 
       - name: Init & sync AxionOS manifest (${{ inputs.manifest_branch }})
+        if: ${{ inputs.sync_source }}
         working-directory: ${{ env.ROM_DIR }}
         run: |
           set -e
-          repo init -u https://github.com/AxionAOSP/android.git -b "${{ inputs.manifest_branch }}" --git-lfs --depth=1
-          echo "==> Disk sebelum repo sync:"
-          df -h "$ROM_DIR"
+          repo init -u https://github.com/AxionAOSP/android.git -b "${{ inputs.manifest_branch }}" --git-lfs
           repo sync -c -f --force-sync --no-tags --no-clone-bundle -j"$(nproc)" --optimized-fetch --prune
-          echo "==> Disk setelah repo sync (kalau sampai sini):"
-          df -h "$ROM_DIR"
 
-      - name: Sync device/vendor/kernel trees (Ingres-Centre & Gurinbone)
+      - name: Sync device/vendor/kernel trees (Ingres-Centre, Gurinbone & kernel Melt)
+        if: ${{ inputs.sync_source }}
         working-directory: ${{ env.ROM_DIR }}
         run: |
           set -e
 
           sync_repo() {
             local url="$1" branch="$2" path="$3"
-            rm -rf "$path"
-            git clone --depth=1 -b "$branch" "$url" "$path"
+            if [ -d "$path/.git" ]; then
+              echo "==> Update: $path (@ $branch)"
+              git -C "$path" remote set-url origin "$url"
+              git -C "$path" fetch origin "$branch" --depth=1
+              git -C "$path" checkout -B "$branch" "origin/$branch"
+              git -C "$path" reset --hard "origin/$branch"
+              git -C "$path" clean -ffdx
+            else
+              echo "==> Clone: $path (@ $branch)"
+              rm -rf "$path"
+              git clone --depth=1 -b "$branch" "$url" "$path"
+            fi
           }
 
           D="${{ inputs.device_branch }}"
           P="${{ inputs.packages_branch }}"
           H="${{ inputs.hardware_branch }}"
+          K="${{ inputs.kernel_branch }}"
 
           sync_repo "https://github.com/Ingres-Centre/android_device_xiaomi_${DEVICE}"         "$D" "device/xiaomi/${DEVICE}"
           sync_repo "https://github.com/Gurinbone/android_device_xiaomi_${SOC}-common"         "$D" "device/xiaomi/${SOC}-common"
           sync_repo "https://github.com/Gurinbone/proprietary_vendor_xiaomi_${DEVICE}"         "$D" "vendor/xiaomi/${DEVICE}"
           sync_repo "https://github.com/Gurinbone/proprietary_vendor_xiaomi_${SOC}-common"     "$D" "vendor/xiaomi/${SOC}-common"
-          sync_repo "https://github.com/Ingres-Centre/android_kernel_xiaomi_${SOC}"            "$D" "kernel/xiaomi/${SOC}"
-          sync_repo "https://github.com/LineageOS/android_kernel_xiaomi_${SOC}-modules"        "$D" "kernel/xiaomi/${SOC}-modules"
-          sync_repo "https://github.com/Ingres-Centre/android_kernel_xiaomi_${SOC}-devicetrees" "$D" "kernel/xiaomi/${SOC}-devicetrees"
-          sync_repo "https://github.com/Ingres-Centre/android_packages_apps_gamekeys"          "$P" "packages/apps/GameKeys"
-          sync_repo "https://github.com/Ingres-Centre/android_packages_apps_leds"              "$P" "packages/apps/Leds"
-          sync_repo "https://github.com/LineageOS/android_hardware_xiaomi"                     "$H" "hardware/xiaomi"
+
+          # Kernel: repo Melt kingD2N sebagai full source ke kernel/xiaomi/<soc>
+          sync_repo "${{ inputs.kernel_repo }}"                                                  "$K" "kernel/xiaomi/${SOC}"
+
+          # Modul & devicetrees tetap dari tree resmi (dibutuhkan build, bukan bagian dari repo Melt)
+          sync_repo "https://github.com/LineageOS/android_kernel_xiaomi_${SOC}-modules"          "$D" "kernel/xiaomi/${SOC}-modules"
+          sync_repo "https://github.com/Ingres-Centre/android_kernel_xiaomi_${SOC}-devicetrees"  "$D" "kernel/xiaomi/${SOC}-devicetrees"
+
+          sync_repo "https://github.com/Ingres-Centre/android_packages_apps_gamekeys"            "$P" "packages/apps/GameKeys"
+          sync_repo "https://github.com/Ingres-Centre/android_packages_apps_leds"                "$P" "packages/apps/Leds"
+          sync_repo "https://github.com/LineageOS/android_hardware_xiaomi"                       "$H" "hardware/xiaomi"
 
           if [[ "${{ inputs.include_miuicamera }}" == true ]]; then
             sync_repo "https://github.com/Gurinbone/android_device_xiaomi_miuicamera-${DEVICE}" "$D" "device/xiaomi/miuicamera-${DEVICE}"
@@ -215,9 +267,6 @@ jobs:
             sync_repo "https://github.com/Gurinbone/hardware_dolby"        "${{ inputs.dolby_hw_branch }}" "hardware/dolby"
             sync_repo "https://github.com/Gurinbone/packages_apps_DolbyUI" "${{ inputs.dolby_ui_branch }}" "packages/apps/DolbyUI"
           fi
-
-          echo "==> Disk setelah sync device/vendor/kernel tree (kalau sampai sini):"
-          df -h "$ROM_DIR"
 
       - name: Terapkan commit GameKeys & Leds (hardware/lineage/interfaces)
         working-directory: ${{ env.ROM_DIR }}/hardware/lineage/interfaces
@@ -233,7 +282,7 @@ jobs:
                    cf431b188a7aa143b99f46e7522a295a3cb04d66 \
                    fa0664db2da556267cb4400008d5f2f0db9091c7; do
             if ! git cherry-pick -X theirs "$c"; then
-              echo "::error::Cherry-pick $c gagal di hardware/lineage/interfaces."
+              echo "::error::Cherry-pick $c gagal di hardware/lineage/interfaces - cek konflik manual (kemungkinan tree lineage-23.2 sudah berubah dari basis komit ini)."
               git cherry-pick --abort
               exit 1
             fi
@@ -253,13 +302,13 @@ jobs:
                    9319664761f6c0fb3c822dbb12350287ade8fe77 \
                    864a5bc08a805ea412ea4221b4f915bc0c9d109c; do
             if ! git cherry-pick -X theirs "$c"; then
-              echo "::error::Cherry-pick $c gagal di device/lineage/sepolicy."
+              echo "::error::Cherry-pick $c gagal di device/lineage/sepolicy - cek konflik manual (kemungkinan tree lineage-23.2 sudah berubah dari basis komit ini)."
               git cherry-pick --abort
               exit 1
             fi
           done
 
-      - name: Integrasi root solution ke kernel in-tree (${{ inputs.ksu_type }})
+      - name: Integrasi root solution ke kernel Melt (${{ inputs.ksu_type }})
         if: ${{ inputs.ksu_type != 'None' }}
         working-directory: ${{ env.ROM_DIR }}/kernel/xiaomi/${{ env.SOC }}
         run: |
@@ -282,18 +331,46 @@ jobs:
               ;;
           esac
 
-      - name: Build AxionOS ROM (no ccache - lihat catatan di atas file)
+      - name: Build AxionOS ROM
         working-directory: ${{ env.ROM_DIR }}
         run: |
           set -e
           date +%s > .ci_build_marker
-          echo "==> Disk sebelum build:"
-          df -h "$ROM_DIR"
+
+          if [[ "${{ inputs.ccache_update }}" == true ]]; then
+            echo "==> Membersihkan ccache lama..."
+            rm -rf "$HOME/.ccache-axion-${DEVICE}"
+          fi
+
+          export USE_CCACHE=1
+          export CCACHE_EXEC="$(command -v ccache)"
+          export CCACHE_DIR="$HOME/.ccache-axion-${DEVICE}"
+          export CCACHE_COMPILERCHECK="none"
+          export CCACHE_BASEDIR="${ROM_DIR}"
+          export CCACHE_NOHASHDIR="true"
+          export CCACHE_NOHARDLINK="true"
+          mkdir -p "$CCACHE_DIR"
+          SLOPPINESS_LINE="sloppiness = file_stat_matches,include_file_ctime,include_file_mtime,pch_defines,file_macro,time_macros"
+          grep -qxF "$SLOPPINESS_LINE" "${CCACHE_DIR}/ccache.conf" 2>/dev/null || echo "$SLOPPINESS_LINE" >> "${CCACHE_DIR}/ccache.conf"
+          ccache -M "${{ inputs.ccache_size }}"
+          ccache -o compression=true
+          echo "ccache status sebelum build:"
+          ccache -s
 
           source build/envsetup.sh
 
-          echo "==> Generating signing keys (selalu fresh - runner ini gak persisten)"
-          gk -s
+          KEY_DIR="vendor/lineage-priv/keys"
+          if [[ "${{ inputs.regen_keys }}" == true ]] || [ ! -d "$KEY_DIR" ] || [ -z "$(ls -A "$KEY_DIR" 2>/dev/null)" ]; then
+            echo "==> Generating signing keys ($KEY_DIR)"
+            gk -s
+          else
+            echo "==> Signing keys sudah ada di $KEY_DIR, dipertahankan (set regen_keys: true untuk generate ulang)"
+          fi
+
+          if [[ "${{ inputs.clean_build }}" == true ]]; then
+            echo "==> clean_build aktif - menjalankan mka clobber"
+            mka clobber || rm -rf out
+          fi
 
           axion "${DEVICE}" "${{ inputs.build_type }}" "${{ inputs.gms_variant }}"
 
@@ -306,8 +383,8 @@ jobs:
           BUILD_STATUS=${PIPESTATUS[0]}
           set -e
 
-          echo "==> Disk setelah build (kalau sampai sini):"
-          df -h "$ROM_DIR"
+          echo "ccache status setelah build:"
+          ccache -s
 
           exit "$BUILD_STATUS"
 
@@ -318,7 +395,7 @@ jobs:
         run: |
           OUT_DIR="out/target/product/${DEVICE}"
           if [ ! -d "$OUT_DIR" ]; then
-            echo "::error::Direktori output $OUT_DIR tidak ditemukan - build kemungkinan gagal sebelum tahap packaging (kehabisan disk atau kena timeout 6 jam, lihat log step sebelumnya)."
+            echo "::error::Direktori output $OUT_DIR tidak ditemukan - build kemungkinan gagal sebelum tahap packaging."
             exit 1
           fi
 
@@ -327,7 +404,7 @@ jobs:
                       | sort | head -n1)
 
           if [ -z "$ROM_ZIP" ]; then
-            echo "::error::Tidak ada file .zip baru ditemukan di $OUT_DIR."
+            echo "::error::Tidak ada file .zip baru ditemukan di $OUT_DIR - build kemungkinan gagal sebelum 'ax -br' selesai membungkus ROM."
             echo "Isi $OUT_DIR (6 file terbaru):"
             ls -lt "$OUT_DIR" | head -n 6 || true
             exit 1
@@ -343,24 +420,20 @@ jobs:
             echo "out_dir=$OUT_DIR"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Disk akhir (selalu tampilkan, buat diagnosa kalau gagal)
-        if: always()
-        run: df -h /
-
       - name: Siapkan log build untuk diupload (jika gagal)
         if: failure()
         run: |
           if [ -f "$BUILD_LOG" ]; then
             tail -n 3000 "$BUILD_LOG" > "${BUILD_LOG}.tail"
           else
-            echo "Log build tidak ditemukan di $BUILD_LOG (build kemungkinan mati sebelum tahap ini - cek step 'Disk akhir' di atas)" > "${BUILD_LOG}.tail"
+            echo "Log build tidak ditemukan di $BUILD_LOG" > "${BUILD_LOG}.tail"
           fi
 
       - name: Upload log build (jika gagal)
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: axionos-vanilla-${{ inputs.device }}-build-log
+          name: axionos-${{ inputs.device }}-build-log
           path: ${{ env.BUILD_LOG }}.tail
           if-no-files-found: warn
 
@@ -373,12 +446,17 @@ jobs:
           ROM_ZIP="${{ steps.locate.outputs.rom_zip }}"
           ROM_SHA256="${{ steps.locate.outputs.rom_sha256 }}"
           BUILD_TIME=$(date -u +"%Y%m%d_%H%M")
-          REL_NAME="AxionOS-Vanilla-${DEVICE}-${{ inputs.build_type }}-${BUILD_TIME}"
+          REL_NAME="AxionOS-${DEVICE}-melt-${{ inputs.build_type }}-${{ inputs.gms_variant }}-${BUILD_TIME}"
 
           ASSETS=("$ROM_ZIP")
           for img in boot.img dtbo.img vendor_boot.img vendor_kernel_boot.img; do
             [ -f "$OUT_DIR/$img" ] && ASSETS+=("$OUT_DIR/$img")
           done
+
+          dolby_status="Tidak disertakan"
+          [[ "${{ inputs.include_dolby }}" == true ]] && dolby_status="Disertakan (hardware_dolby@${{ inputs.dolby_hw_branch }}, DolbyUI@${{ inputs.dolby_ui_branch }})"
+          miuicamera_status="Tidak disertakan"
+          [[ "${{ inputs.include_miuicamera }}" == true ]] && miuicamera_status="Disertakan"
 
           cat > release_notes.md << NOTES_EOF
           #
@@ -386,12 +464,17 @@ jobs:
           | | |
           |:---|:---|
           | 📱 Device | POCO F4 GT (${DEVICE}) • Redmi K50G (${DEVICE}) |
-          | 🟠 ROM | AxionOS Vanilla |
+          | 🟠 ROM | AxionOS |
           | 🌿 Manifest branch | ${{ inputs.manifest_branch }} |
+          | 🌿 Device/vendor branch | ${{ inputs.device_branch }} |
+          | 🌿 GameKeys/Leds branch | ${{ inputs.packages_branch }} |
+          | 🐧 Kernel | Melt (kingD2N/kernel_source_Melt_xiaomi_ingres @ ${{ inputs.kernel_branch }}) |
           | 🧩 Build type | ${{ inputs.build_type }} |
           | 🔧 Variant | ${{ inputs.gms_variant }} |
           | 💻 Root solution | ${{ inputs.ksu_type }} |
-          | 🏗️ Runner | GitHub-hosted (ubuntu-latest) |
+          | 🎧 Dolby | ${dolby_status} |
+          | 📷 MIUI Camera HAL | ${miuicamera_status} |
+          | 🧬 SoC | ${SOC} |
           | 🔐 SHA256 | \`${ROM_SHA256}\` |
 
           ---
