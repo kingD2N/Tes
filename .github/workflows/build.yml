@@ -1,485 +1,310 @@
-# Build AxionOS (LineageOS 23.2-based) untuk Xiaomi POCO F4 GT / Redmi K50G (ingres, SM8450)
-# dengan kernel Melt (kingD2N/kernel_source_Melt_xiaomi_ingres)
-#
-# Requires a SELF-HOSTED runner labeled `rom-builder` (persistent disk, bukan
-# GitHub-hosted - full AOSP/AxionOS tree + out/ + ccache butuh ~250-400GB):
-#   - repo/git-lfs auto-terinstall di bawah jika belum ada
-#   - 64GB+ RAM (atau swap setara) direkomendasikan - tidak dikonfigurasi di sini
-#     karena itu urusan host self-hosted rig, bukan per-job CI step
-#
-# Source di LUAR $GITHUB_WORKSPACE di $HOME/rom-src/axion-<device>, supaya:
-#   - bertahan antar run terlepas dari behavior clean/reset actions/checkout
-#   - `repo sync` tetap incremental, tidak re-fetch semuanya tiap run
+name: Port HyperOS -> ingres (Recovery)
 
-name: Build AxionOS ROM - POCO F4 GT (Ingres) + Kernel Melt
 
 on:
   workflow_dispatch:
     inputs:
-      device:
-        description: "Device codename"
+      base_rom_url:
+        description: "URL zip base ROM ingres (zip recovery; META-INF & firmware-nya dipakai)"
         required: true
         type: string
-        default: "ingres"
-
-      soc:
-        description: "SoC/platform codename (dipakai untuk path kernel & device-common tree)"
+      port_rom_url:
+        description: "URL OTA full ROM donor HyperOS A16/A17 (.zip berisi payload.bin)"
         required: true
         type: string
-        default: "sm8450"
-
-      manifest_branch:
-        description: "Branch manifest AxionOS (AxionAOSP/android) - juga dipakai sebagai basis reset untuk hardware/lineage/interfaces & device/lineage/sepolicy sebelum cherry-pick"
-        required: true
-        type: string
-        default: "lineage-23.2"
-
-      device_branch:
-        description: "Branch untuk device/vendor tree ingres (Ingres-Centre & Gurinbone)"
-        required: true
-        type: string
-        default: "lineage-23.2"
-
-      kernel_repo:
-        description: "URL repo kernel Melt ingres (full source, di-clone ke kernel/xiaomi/<soc>)"
-        required: true
-        type: string
-        default: "https://github.com/kingD2N/kernel_source_Melt_xiaomi_ingres"
-
-      kernel_branch:
-        description: "Branch kernel Melt"
-        required: true
-        type: string
-        default: "main"
-
-      packages_branch:
-        description: "Branch untuk packages GameKeys & Leds (Ingres-Centre) - beda dari device_branch, defaultnya lineage-23.0"
-        required: true
-        type: string
-        default: "lineage-23.0"
-
-      hardware_branch:
-        description: "Branch untuk hardware/xiaomi (LineageOS)"
-        required: true
-        type: string
-        default: "lineage-23.2"
-
-      include_miuicamera:
-        description: "Sertakan MIUI Camera HAL (device+vendor miuicamera-<device>, Gurinbone)"
-        required: true
-        type: boolean
-        default: true
-
-      include_dolby:
-        description: "Sertakan Dolby (hardware_dolby + packages_apps_DolbyUI, Gurinbone)"
-        required: true
-        type: boolean
-        default: true
-
-      dolby_hw_branch:
-        description: "Branch hardware_dolby"
+      super_size:
+        description: "Ukuran partisi super (byte). 'auto' = otodeteksi dari metadata super ROM base (disarankan untuk ingres, belum ada angka pasti yang tervalidasi). Isi manual kalau auto gagal: adb shell su -c 'blockdev --getsize64 /dev/block/by-name/super'"
         required: false
+        default: "auto"
         type: string
-        default: "Dolby-Vision-2.1"
-
-      dolby_ui_branch:
-        description: "Branch packages_apps_DolbyUI"
+      ext4_partitions:
+        description: "Partisi yang dibangun EXT4 (sisanya EROFS)"
         required: false
+        default: "vendor odm"
         type: string
-        default: "16.0"
-
-      ksu_type:
-        description: "Root solution yang di-setup ke kernel in-tree (kernel/xiaomi/<soc>). Melt sering sudah embed KSU - pakai None kalau sudah built-in"
-        required: true
-        type: choice
-        default: "None"
-        options:
-          - None
-          - Official-KernelSU
-          - KernelSU-Next
-          - KowSU
-          - ReSukiSU
-          - SukiSUUltra
-
-      build_type:
-        description: "Build type (axion <device> <build_type> <gms_variant>)"
-        required: true
-        type: choice
-        default: "userdebug"
-        options:
-          - user
-          - userdebug
-          - eng
-
-      gms_variant:
-        description: "GMS variant (axion <device> <build_type> <gms_variant>)"
-        required: true
-        type: choice
-        default: "gms"
-        options:
-          - gms
-          - pico
-          - core
-          - full
-          - va
-
-      sync_source:
-        description: "Jalankan repo init/sync + sync tree device-specific. Matikan untuk rebuild cepat dari source yang sudah ada (butuh sync sukses minimal sekali sebelumnya)"
-        required: true
-        type: boolean
-        default: true
-
-      clean_build:
-        description: "Paksa clean build (mka clobber sebelum axion/ax) - ccache tetap dipakai"
-        required: true
-        type: boolean
-        default: false
-
-      regen_keys:
-        description: "Paksa generate ulang signing keys (gk -s) walau vendor/lineage-priv/keys sudah ada - HATI-HATI: mengganti keys memutus kontinuitas update OTA dari build sebelumnya"
-        required: true
-        type: boolean
-        default: false
-
-      ccache_update:
-        description: "Hapus ccache lama sebelum build (fresh cache)"
-        required: true
-        type: boolean
-        default: false
-
-      ccache_size:
-        description: "Ukuran maksimum ccache"
-        required: true
-        type: string
-        default: "75G"
-
-      job_count:
-        description: "Override jumlah thread untuk 'ax -br -j'. Kosongkan untuk pakai nproc otomatis"
+      debloat:
+        description: "Debloat tambahan: package / folder / path, pisah spasi (mis. product/app/Foo)"
         required: false
-        type: string
         default: ""
+        type: string
+      disable_encryption:
+        description: "Matikan fileencryption/metadata_encryption di fstab"
+        required: false
+        default: true
+        type: boolean
+      rw_mount:
+        description: "Mount partisi EXT4 sebagai rw"
+        required: false
+        default: true
+        type: boolean
+      debug_adb:
+        description: "ADB aktif sejak boot (untuk logcat saat bootloop)"
+        required: false
+        default: true
+        type: boolean
+      recovery_img_url:
+        description: "Opsional: URL recovery.img custom (OrangeFox). Kosong = recovery HP tidak disentuh"
+        required: false
+        default: ""
+        type: string
+      release_repo:
+        description: "owner/repo untuk GitHub Release (kosong = upload artifact)"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: port-hyperos-ingres-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # ---- default yang bisa diubah di sini ----
+  TARGET_DEVICE: ingres
+  PORT_PARTITIONS: "system system_ext product mi_ext"
+  DISABLE_AVB: "true"
+  EROFS_COMP: "lz4hc,9"
+  EXT4_HEADROOM_MB: "128"
+  VNDK_COMPAT: "true"          # vendor butuh VNDK APEX versi lama -> salin dari ROM base
+  LINKER_CHECK: "true"         # laporan dependensi linker ELF vendor/odm (info)
+  VINTF_COMPAT: "true"         # FCM level vendor tak dikenal donor -> salin compatibility_matrix.<lv>.xml dari system base ke /system/etc/vintf port
+  PROP_MERGE: "true"           # salin props khas device dari product/etc/build.prop base ingres
+  OVERLAY_FIX: "true"          # buang overlay khas donor, salin overlay khas ingres (lihat catatan devices/ingres/ di atas)
+  INSTALLER: base               # base = pakai META-INF ROM base | ours = installer buatan script
+  RECOVERY_SUPER: raw          # hanya INSTALLER=ours. Mode base: super mengikuti layout zip base (super.img.0..8 sparse)
+  # boot.img custom (kernel melt-rebase) menggantikan boot.img base; kosongkan untuk pakai boot base
+  BOOT_IMG: ""
+  # Gboard sebagai keyboard sistem (product/app/LatinImeGoogle); kosongkan untuk tidak menambah
+  GBOARD_APK: https://github.com/Yudharmdn/boot-melt-rebase/releases/download/boot-melt-rebase/LatinImeGoogle.apk
+  GBOARD_PACKAGE: com.charlie.android.inputmethod.latin
+  REPLACE_FROM_BASE: "device_features displayconfig overlay camera"
+  DEBLOAT_PRESET: none         # debloat hanya dari debloat_packages.txt (safe = + hapus semua data-app)
+  DEBLOAT_SAFE_KEEP: "MIUIGallery"   # folder data-app yang dipertahankan (pisah spasi)
+  FIT_FALLBACK_EROFS: "true"   # super tidak muat -> vendor/odm otomatis EROFS
+  ZIP_LEVEL: "6"                # 1 = cepat/zip besar ... 9 = paling kecil (tahap zip lebih lama)
+  TOOLKIT_REPO: toraidl/hyperos_port
+  TOOLKIT_SHA: 523b0f6378e77e9e93ba6e15a064f45b26274eab
+  SPLIT_SIZE: 1900M
 
 jobs:
-  Build_ROM:
-    runs-on: [self-hosted, rom-builder]
-    timeout-minutes: 1440
-    concurrency:
-      # github.workflow disertakan supaya run dari workflow file BERBEDA (mis.
-      # versi lama tanpa "+ Kernel Melt") tidak ikut mengantre di group yang sama
-      group: ${{ github.workflow }}-axionos-${{ inputs.device }}-build
-      cancel-in-progress: false
-    permissions:
-      contents: write
-    defaults:
-      run:
-        shell: bash
-    env:
-      GH_TOKEN: ${{ github.token }}
-      DEVICE: ${{ inputs.device }}
-      SOC: ${{ inputs.soc }}
+  port:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
     steps:
-      - uses: actions/checkout@v7
+      - name: Kosongkan disk runner
+        uses: jlumbroso/free-disk-space@v2
+        with:
+          preinstalled-runtimes: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: false
 
-      - name: Prepare persistent ROM workspace
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install dependensi
         run: |
-          ROM_DIR="$HOME/rom-src/axion-${DEVICE}"
-          mkdir -p "$ROM_DIR" "$HOME/bin"
-          echo "ROM_DIR=$ROM_DIR" >> "$GITHUB_ENV"
-          echo "BUILD_LOG=$HOME/axion-${DEVICE}-build.log" >> "$GITHUB_ENV"
-          echo "$HOME/bin" >> "$GITHUB_PATH"
-          echo "==> Persistent source tree: $ROM_DIR"
-          df -h "$HOME"
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq aria2 zstd zip unzip e2fsprogs python3 >/dev/null
+          aria2c --version | head -n1
 
-      - name: Install repo tool & build dependencies
+      - name: Ambil toolkit (pinned)
         run: |
-          if ! command -v repo >/dev/null 2>&1; then
-            curl -s https://storage.googleapis.com/git-repo-downloads/repo > "$HOME/bin/repo"
-            chmod a+x "$HOME/bin/repo"
-          fi
-          repo --version
+          set -euo pipefail
+          git init -q toolkit
+          cd toolkit
+          git remote add origin "https://github.com/${TOOLKIT_REPO}.git"
+          git sparse-checkout set --no-cone '/bin/Linux/x86_64/' '/bin/*.py' '/bin/imgextractor/' '/bin/flash/zstd'
+          git fetch -q --depth 1 --filter=blob:none origin "$TOOLKIT_SHA"
+          git checkout -q FETCH_HEAD
+          chmod +x bin/Linux/x86_64/*
+          echo "TOOLS_DIR=$PWD" >> "$GITHUB_ENV"
 
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            bc bison build-essential ccache curl erofs-utils flex \
-            g++-multilib gcc-multilib git git-lfs gnupg gperf imagemagick \
-            lib32readline-dev lib32z1-dev libdw-dev libelf-dev libgnutls28-dev \
-            lz4 libsdl1.2-dev libssl-dev libxml2-utils lzop pngcrush rsync \
-            schedtool squashfs-tools xsltproc xxd zip unzip zlib1g-dev \
-            python3 python-is-python3 protobuf-compiler python3-protobuf fontconfig
-
-          git lfs install --skip-repo
-
-      - name: Init & sync AxionOS manifest (${{ inputs.manifest_branch }})
-        if: ${{ inputs.sync_source }}
-        working-directory: ${{ env.ROM_DIR }}
+      - name: Ambil extract.erofs terbaru (sekaiacg)
+        # ROM HyperOS baru bisa pakai fitur EROFS yang belum dikenal extract.erofs lama di toolkit.
+        # Kalau step ini gagal, port.sh otomatis pakai extract.erofs toolkit.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          set -e
-          repo init -u https://github.com/AxionAOSP/android.git -b "${{ inputs.manifest_branch }}" --git-lfs
-          repo sync -c -f --force-sync --no-tags --no-clone-bundle -j"$(nproc)" --optimized-fetch --prune
-
-      - name: Sync device/vendor/kernel trees (Ingres-Centre, Gurinbone & kernel Melt)
-        if: ${{ inputs.sync_source }}
-        working-directory: ${{ env.ROM_DIR }}
-        run: |
-          set -e
-
-          sync_repo() {
-            local url="$1" branch="$2" path="$3"
-            if [ -d "$path/.git" ]; then
-              echo "==> Update: $path (@ $branch)"
-              git -C "$path" remote set-url origin "$url"
-              git -C "$path" fetch origin "$branch" --depth=1
-              git -C "$path" checkout -B "$branch" "origin/$branch"
-              git -C "$path" reset --hard "origin/$branch"
-              git -C "$path" clean -ffdx
-            else
-              echo "==> Clone: $path (@ $branch)"
-              rm -rf "$path"
-              git clone --depth=1 -b "$branch" "$url" "$path"
-            fi
-          }
-
-          D="${{ inputs.device_branch }}"
-          P="${{ inputs.packages_branch }}"
-          H="${{ inputs.hardware_branch }}"
-          K="${{ inputs.kernel_branch }}"
-
-          sync_repo "https://github.com/Ingres-Centre/android_device_xiaomi_${DEVICE}"         "$D" "device/xiaomi/${DEVICE}"
-          sync_repo "https://github.com/Gurinbone/android_device_xiaomi_${SOC}-common"         "$D" "device/xiaomi/${SOC}-common"
-          sync_repo "https://github.com/Gurinbone/proprietary_vendor_xiaomi_${DEVICE}"         "$D" "vendor/xiaomi/${DEVICE}"
-          sync_repo "https://github.com/Gurinbone/proprietary_vendor_xiaomi_${SOC}-common"     "$D" "vendor/xiaomi/${SOC}-common"
-
-          # Kernel: repo Melt kingD2N sebagai full source ke kernel/xiaomi/<soc>
-          sync_repo "${{ inputs.kernel_repo }}"                                                  "$K" "kernel/xiaomi/${SOC}"
-
-          # Modul & devicetrees tetap dari tree resmi (dibutuhkan build, bukan bagian dari repo Melt)
-          sync_repo "https://github.com/LineageOS/android_kernel_xiaomi_${SOC}-modules"          "$D" "kernel/xiaomi/${SOC}-modules"
-          sync_repo "https://github.com/Ingres-Centre/android_kernel_xiaomi_${SOC}-devicetrees"  "$D" "kernel/xiaomi/${SOC}-devicetrees"
-
-          sync_repo "https://github.com/Ingres-Centre/android_packages_apps_gamekeys"            "$P" "packages/apps/GameKeys"
-          sync_repo "https://github.com/Ingres-Centre/android_packages_apps_leds"                "$P" "packages/apps/Leds"
-          sync_repo "https://github.com/LineageOS/android_hardware_xiaomi"                       "$H" "hardware/xiaomi"
-
-          if [[ "${{ inputs.include_miuicamera }}" == true ]]; then
-            sync_repo "https://github.com/Gurinbone/android_device_xiaomi_miuicamera-${DEVICE}" "$D" "device/xiaomi/miuicamera-${DEVICE}"
-            sync_repo "https://github.com/Gurinbone/android_vendor_xiaomi_miuicamera-${DEVICE}" "$D" "vendor/xiaomi/miuicamera-${DEVICE}"
-          fi
-
-          if [[ "${{ inputs.include_dolby }}" == true ]]; then
-            sync_repo "https://github.com/Gurinbone/hardware_dolby"        "${{ inputs.dolby_hw_branch }}" "hardware/dolby"
-            sync_repo "https://github.com/Gurinbone/packages_apps_DolbyUI" "${{ inputs.dolby_ui_branch }}" "packages/apps/DolbyUI"
-          fi
-
-      - name: Terapkan commit GameKeys & Leds (hardware/lineage/interfaces)
-        working-directory: ${{ env.ROM_DIR }}/hardware/lineage/interfaces
-        run: |
-          set -e
-          git fetch origin "${{ inputs.manifest_branch }}"
-          git reset --hard "origin/${{ inputs.manifest_branch }}"
-          git remote remove ingres 2>/dev/null || true
-          git remote add ingres https://github.com/Ingres-Centre/android_hardware_lineage_interfaces.git
-          git fetch ingres
-
-          for c in fed24686e662735bcb2a5028889ce1fd51980d2c \
-                   cf431b188a7aa143b99f46e7522a295a3cb04d66 \
-                   fa0664db2da556267cb4400008d5f2f0db9091c7; do
-            if ! git cherry-pick -X theirs "$c"; then
-              echo "::error::Cherry-pick $c gagal di hardware/lineage/interfaces - cek konflik manual (kemungkinan tree lineage-23.2 sudah berubah dari basis komit ini)."
-              git cherry-pick --abort
-              exit 1
-            fi
-          done
-
-      - name: Terapkan commit GameKeys & Leds (device/lineage/sepolicy)
-        working-directory: ${{ env.ROM_DIR }}/device/lineage/sepolicy
-        run: |
-          set -e
-          git fetch origin "${{ inputs.manifest_branch }}"
-          git reset --hard "origin/${{ inputs.manifest_branch }}"
-          git remote remove ingres 2>/dev/null || true
-          git remote add ingres https://github.com/Ingres-Centre/android_device_lineage_sepolicy.git
-          git fetch ingres
-
-          for c in 48c5dc61da2bdee3e2cac31a707edf14174a1a2f \
-                   9319664761f6c0fb3c822dbb12350287ade8fe77 \
-                   864a5bc08a805ea412ea4221b4f915bc0c9d109c; do
-            if ! git cherry-pick -X theirs "$c"; then
-              echo "::error::Cherry-pick $c gagal di device/lineage/sepolicy - cek konflik manual (kemungkinan tree lineage-23.2 sudah berubah dari basis komit ini)."
-              git cherry-pick --abort
-              exit 1
-            fi
-          done
-
-      - name: Integrasi root solution ke kernel Melt (${{ inputs.ksu_type }})
-        if: ${{ inputs.ksu_type != 'None' }}
-        working-directory: ${{ env.ROM_DIR }}/kernel/xiaomi/${{ env.SOC }}
-        run: |
-          set -e
-          case "${{ inputs.ksu_type }}" in
-            "Official-KernelSU")
-              curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
-              ;;
-            "KowSU")
-              curl -LSs "https://raw.githubusercontent.com/KOWX712/KernelSU/main/kernel/setup.sh" | bash -s master
-              ;;
-            "KernelSU-Next")
-              curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s dev
-              ;;
-            "ReSukiSU")
-              curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
-              ;;
-            "SukiSUUltra")
-              curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
-              ;;
+          set -euo pipefail
+          repo=sekaiacg/erofs-utils
+          asset=$(gh release view -R "$repo" --json assets -q '.assets[].name' \
+                  | grep -iE 'linux' | grep -iE 'x86_64|amd64' | head -n1)
+          [ -n "$asset" ] || { echo "asset Linux x86_64 tidak ditemukan"; exit 1; }
+          echo "asset: $asset"
+          mkdir -p erofs-new && cd erofs-new
+          gh release download -R "$repo" -p "$asset"
+          case "$asset" in
+            *.zip) unzip -q -o "$asset" ;;
+            *.tar.gz|*.tgz) tar -xzf "$asset" ;;
+            *.tar.xz) tar -xJf "$asset" ;;
           esac
+          bin=$(find "$PWD" -type f -name extract.erofs | head -n1)
+          [ -n "$bin" ] || { echo "extract.erofs tidak ada di $asset"; exit 1; }
+          chmod +x "$bin"
+          rc=0; "$bin" -V > ver.txt 2>&1 || rc=$?
+          head -n 3 ver.txt
+          [ "$rc" -lt 126 ] || { echo "extract.erofs tidak bisa dijalankan (rc=$rc)"; exit 1; }
+          echo "EXTRACT_EROFS=$bin" >> "$GITHUB_ENV"
 
-      - name: Build AxionOS ROM
-        working-directory: ${{ env.ROM_DIR }}
+      - name: Pilih lokasi kerja (disk paling lega)
         run: |
-          set -e
-          date +%s > .ci_build_marker
-
-          if [[ "${{ inputs.ccache_update }}" == true ]]; then
-            echo "==> Membersihkan ccache lama..."
-            rm -rf "$HOME/.ccache-axion-${DEVICE}"
+          set -euo pipefail
+          best="$GITHUB_WORKSPACE"; best_free=$(df --output=avail -B1 "$GITHUB_WORKSPACE" | tail -n1)
+          if [ -d /mnt ]; then
+            mnt_free=$(df --output=avail -B1 /mnt | tail -n1)
+            if [ "$mnt_free" -gt "$best_free" ]; then
+              sudo mkdir -p /mnt/port && sudo chown "$USER" /mnt/port
+              best=/mnt/port; best_free=$mnt_free
+            fi
           fi
+          echo "WORK=$best/work" >> "$GITHUB_ENV"
+          echo "OUT=$GITHUB_WORKSPACE/out" >> "$GITHUB_ENV"
+          df -h "$GITHUB_WORKSPACE" /mnt 2>/dev/null || true
+          echo "Lokasi kerja: $best ($((best_free / 1073741824)) GB bebas)"
 
-          export USE_CCACHE=1
-          export CCACHE_EXEC="$(command -v ccache)"
-          export CCACHE_DIR="$HOME/.ccache-axion-${DEVICE}"
-          export CCACHE_COMPILERCHECK="none"
-          export CCACHE_BASEDIR="${ROM_DIR}"
-          export CCACHE_NOHASHDIR="true"
-          export CCACHE_NOHARDLINK="true"
-          mkdir -p "$CCACHE_DIR"
-          SLOPPINESS_LINE="sloppiness = file_stat_matches,include_file_ctime,include_file_mtime,pch_defines,file_macro,time_macros"
-          grep -qxF "$SLOPPINESS_LINE" "${CCACHE_DIR}/ccache.conf" 2>/dev/null || echo "$SLOPPINESS_LINE" >> "${CCACHE_DIR}/ccache.conf"
-          ccache -M "${{ inputs.ccache_size }}"
-          ccache -o compression=true
-          echo "ccache status sebelum build:"
-          ccache -s
-
-          source build/envsetup.sh
-
-          KEY_DIR="vendor/lineage-priv/keys"
-          if [[ "${{ inputs.regen_keys }}" == true ]] || [ ! -d "$KEY_DIR" ] || [ -z "$(ls -A "$KEY_DIR" 2>/dev/null)" ]; then
-            echo "==> Generating signing keys ($KEY_DIR)"
-            gk -s
-          else
-            echo "==> Signing keys sudah ada di $KEY_DIR, dipertahankan (set regen_keys: true untuk generate ulang)"
-          fi
-
-          if [[ "${{ inputs.clean_build }}" == true ]]; then
-            echo "==> clean_build aktif - menjalankan mka clobber"
-            mka clobber || rm -rf out
-          fi
-
-          axion "${DEVICE}" "${{ inputs.build_type }}" "${{ inputs.gms_variant }}"
-
-          JOBS="${{ inputs.job_count }}"
-          [[ -z "$JOBS" ]] && JOBS="$(nproc)"
-          echo "==> Building dengan -j${JOBS}"
-
-          set +e
-          ax -br -j"${JOBS}" 2>&1 | tee "$BUILD_LOG"
-          BUILD_STATUS=${PIPESTATUS[0]}
-          set -e
-
-          echo "ccache status setelah build:"
-          ccache -s
-
-          exit "$BUILD_STATUS"
-
-      - name: Cari output ROM hasil build
-        id: locate
-        if: always()
-        working-directory: ${{ env.ROM_DIR }}
+      - name: Port ROM
+        id: port
+        env:
+          BASE_ROM: ${{ inputs.base_rom_url }}
+          PORT_ROM: ${{ inputs.port_rom_url }}
+          SUPER_SIZE: ${{ inputs.super_size }}
+          EXT4_PARTITIONS: ${{ inputs.ext4_partitions }}
+          DEBLOAT: ${{ inputs.debloat }}
+          DISABLE_ENCRYPTION: ${{ inputs.disable_encryption }}
+          RW_MOUNT: ${{ inputs.rw_mount }}
+          DEBUG_ADB: ${{ inputs.debug_adb }}
+          RECOVERY_IMG: ${{ inputs.recovery_img_url }}
         run: |
-          OUT_DIR="out/target/product/${DEVICE}"
-          if [ ! -d "$OUT_DIR" ]; then
-            echo "::error::Direktori output $OUT_DIR tidak ditemukan - build kemungkinan gagal sebelum tahap packaging."
-            exit 1
-          fi
+          set -euo pipefail
+          sudo -E env "PATH=$PATH" bash scripts/port.sh
+          sudo chown -R "$USER" "$OUT"
 
-          ROM_ZIP=$(find "$OUT_DIR" -maxdepth 1 -type f -iname "*.zip" -newer ".ci_build_marker" \
-                      ! -iname "*target_files*" ! -iname "*ota*" ! -iname "*super_empty*" \
-                      | sort | head -n1)
-
-          if [ -z "$ROM_ZIP" ]; then
-            echo "::error::Tidak ada file .zip baru ditemukan di $OUT_DIR - build kemungkinan gagal sebelum 'ax -br' selesai membungkus ROM."
-            echo "Isi $OUT_DIR (6 file terbaru):"
-            ls -lt "$OUT_DIR" | head -n 6 || true
-            exit 1
-          fi
-
-          echo "==> ROM zip ditemukan: $ROM_ZIP"
-          ROM_SHA256=$(sha256sum "$ROM_ZIP" | awk '{print $1}')
-
-          {
-            echo "rom_zip=$ROM_ZIP"
-            echo "rom_zip_name=$(basename "$ROM_ZIP")"
-            echo "rom_sha256=$ROM_SHA256"
-            echo "out_dir=$OUT_DIR"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Siapkan log build untuk diupload (jika gagal)
-        if: failure()
-        run: |
-          if [ -f "$BUILD_LOG" ]; then
-            tail -n 3000 "$BUILD_LOG" > "${BUILD_LOG}.tail"
-          else
-            echo "Log build tidak ditemukan di $BUILD_LOG" > "${BUILD_LOG}.tail"
-          fi
-
-      - name: Upload log build (jika gagal)
-        if: failure()
+      - name: Upload artifact (zip ROM langsung, tanpa dibungkus)
+        if: ${{ inputs.release_repo == '' }}
         uses: actions/upload-artifact@v7
         with:
-          name: axionos-${{ inputs.device }}-build-log
-          path: ${{ env.BUILD_LOG }}.tail
-          if-no-files-found: warn
+          # archive: false -> file zip ROM di-upload apa adanya; nama artifact = nama file zip
+          path: ${{ steps.port.outputs.zip }}
+          archive: false
+          retention-days: 7
+          if-no-files-found: error
 
-      - name: Buat GitHub Release
-        if: success()
-        working-directory: ${{ env.ROM_DIR }}
+      - name: Upload ke GitHub Release
+        if: ${{ inputs.release_repo != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          RELEASE_REPO: ${{ inputs.release_repo }}
+          ZIP: ${{ steps.port.outputs.zip }}
+          NAME: ${{ steps.port.outputs.name }}
+          PORT_VERSION: ${{ steps.port.outputs.port_version }}
+          DONOR: ${{ steps.port.outputs.donor }}
         run: |
-          set -e
-          OUT_DIR="${{ steps.locate.outputs.out_dir }}"
-          ROM_ZIP="${{ steps.locate.outputs.rom_zip }}"
-          ROM_SHA256="${{ steps.locate.outputs.rom_sha256 }}"
-          BUILD_TIME=$(date -u +"%Y%m%d_%H%M")
-          REL_NAME="AxionOS-${DEVICE}-melt-${{ inputs.build_type }}-${{ inputs.gms_variant }}-${BUILD_TIME}"
+          set -euo pipefail
+          [ -n "${GH_TOKEN:-}" ] || { echo "::error::secret RELEASE_TOKEN belum diisi"; exit 1; }
+          cd "$(dirname "$ZIP")"
+          file=$(basename "$ZIP")
+          assets=("$file.sha256")
+          if [ "$(stat -c%s "$file")" -gt 2000000000 ]; then
+            split -b "$SPLIT_SIZE" -d -a 2 "$file" "$file.part"
+            rm -f "$file"
+            for p in "$file".part*; do assets+=("$p"); done
+            join_note=$(printf 'File dipecah (limit 2 GB per asset). Gabungkan dulu:\n\n    Linux/macOS: cat %s.part* > %s\n    Windows:     copy /b %s.part00+%s.part01+... %s\n' "$file" "$file" "$file" "$file" "$file")
+          else
+            assets+=("$file")
+            join_note=""
+          fi
+          tag="${NAME}-r${GITHUB_RUN_NUMBER}"
+          {
+            echo "HyperOS ${PORT_VERSION} port untuk ${TARGET_DEVICE} (donor: ${DONOR})"
+            echo
+            echo "Flash lewat OrangeFox/TWRP: Install zip -> Format Data (ketik yes) -> Reboot System."
+            echo "Recovery HP tetap dipertahankan kecuali build memakai recovery_img_url."
+            echo
+            echo "$join_note"
+          } > notes.md
+          gh release create "$tag" "${assets[@]}" --repo "$RELEASE_REPO" \
+            --title "$NAME" --notes-file notes.md
 
-          ASSETS=("$ROM_ZIP")
-          for img in boot.img dtbo.img vendor_boot.img vendor_kernel_boot.img; do
-            [ -f "$OUT_DIR/$img" ] && ASSETS+=("$OUT_DIR/$img")
-          done
+      - name: Upload ke Google Drive
+        id: gdrive
+        if: ${{ success() }}
+        env:
+          RCLONE_CONF_B64: ${{ secrets.RCLONE_CONF_B64 }}
+          GDRIVE_REMOTE_PATH: ${{ vars.GDRIVE_REMOTE_PATH || 'gdrive:HyperOS-ingres' }}
+          ZIP: ${{ steps.port.outputs.zip }}
+        run: |
+          set -euo pipefail
 
-          dolby_status="Tidak disertakan"
-          [[ "${{ inputs.include_dolby }}" == true ]] && dolby_status="Disertakan (hardware_dolby@${{ inputs.dolby_hw_branch }}, DolbyUI@${{ inputs.dolby_ui_branch }})"
-          miuicamera_status="Tidak disertakan"
-          [[ "${{ inputs.include_miuicamera }}" == true ]] && miuicamera_status="Disertakan"
+          if [ -z "${RCLONE_CONF_B64:-}" ]; then
+            echo "::warning::Secret RCLONE_CONF_B64 belum diisi - upload ke Google Drive dilewati. Cara setup ada di INGRES-NOTES.md."
+            echo "uploaded=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
-          cat > release_notes.md << NOTES_EOF
-          #
+          curl -fsSL https://rclone.org/install.sh | sudo bash >/dev/null 2>&1
 
-          | | |
-          |:---|:---|
-          | 📱 Device | POCO F4 GT (${DEVICE}) • Redmi K50G (${DEVICE}) |
-          | 🟠 ROM | AxionOS |
-          | 🌿 Manifest branch | ${{ inputs.manifest_branch }} |
-          | 🌿 Device/vendor branch | ${{ inputs.device_branch }} |
-          | 🌿 GameKeys/Leds branch | ${{ inputs.packages_branch }} |
-          | 🐧 Kernel | Melt (kingD2N/kernel_source_Melt_xiaomi_ingres @ ${{ inputs.kernel_branch }}) |
-          | 🧩 Build type | ${{ inputs.build_type }} |
-          | 🔧 Variant | ${{ inputs.gms_variant }} |
-          | 💻 Root solution | ${{ inputs.ksu_type }} |
-          | 🎧 Dolby | ${dolby_status} |
-          | 📷 MIUI Camera HAL | ${miuicamera_status} |
-          | 🧬 SoC | ${SOC} |
-          | 🔐 SHA256 | \`${ROM_SHA256}\` |
+          mkdir -p "$HOME/.config/rclone"
+          echo "$RCLONE_CONF_B64" | base64 -d > "$HOME/.config/rclone/rclone.conf"
+          chmod 600 "$HOME/.config/rclone/rclone.conf"
 
-          ---
-          NOTES_EOF
+          cd "$(dirname "$ZIP")"
+          file=$(basename "$ZIP")
+          [ -f "$file.sha256" ] || sha256sum "$file" > "$file.sha256"
 
-          gh release create "$REL_NAME" --title "$REL_NAME" --notes-file release_notes.md "${ASSETS[@]}"
+          echo "==> Upload $file ke $GDRIVE_REMOTE_PATH"
+          rclone copy "$file" "$GDRIVE_REMOTE_PATH" --drive-chunk-size 256M -P
+          rclone copy "$file.sha256" "$GDRIVE_REMOTE_PATH" -P
+
+          {
+            echo "uploaded=true"
+            echo "gdrive_path=${GDRIVE_REMOTE_PATH}/${file}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Disk akhir (selalu tampilkan, buat diagnosa kalau gagal)
+        if: always()
+        run: df -h /
+
+      - name: Ringkasan
+        if: always()
+        env:
+          DONOR: ${{ steps.port.outputs.donor }}
+          PORT_VERSION: ${{ steps.port.outputs.port_version }}
+          NAME: ${{ steps.port.outputs.name }}
+          EXT4_PARTITIONS: ${{ inputs.ext4_partitions }}
+          DISABLE_ENCRYPTION: ${{ inputs.disable_encryption }}
+          RW_MOUNT: ${{ inputs.rw_mount }}
+          DEBUG_ADB: ${{ inputs.debug_adb }}
+          GDRIVE_UPLOADED: ${{ steps.gdrive.outputs.uploaded }}
+          GDRIVE_PATH: ${{ steps.gdrive.outputs.gdrive_path }}
+        run: |
+          {
+            echo "## Port HyperOS -> ${TARGET_DEVICE}"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Donor | ${DONOR:-?} |"
+            echo "| Versi | ${PORT_VERSION:-?} |"
+            echo "| Output | ${NAME:-gagal} |"
+            echo "| EXT4 | ${EXT4_PARTITIONS} |"
+            echo "| Encryption off | ${DISABLE_ENCRYPTION} |"
+            echo "| RW | ${RW_MOUNT} |"
+            echo "| Debug ADB | ${DEBUG_ADB} |"
+            echo "| Installer | ${INSTALLER} |"
+            if [ "${GDRIVE_UPLOADED:-false}" = "true" ]; then
+              echo "| Google Drive | ${GDRIVE_PATH} |"
+            else
+              echo "| Google Drive | tidak diupload (RCLONE_CONF_B64 belum diisi) |"
+            fi
+            if ls out/*.sha256 >/dev/null 2>&1; then
+              echo
+              echo "SHA256: \`$(cut -d' ' -f1 out/*.sha256 | head -n1)\`"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
