@@ -39,19 +39,36 @@ jobs:
           df -h /
 
       - name: Download OTA full
+        timeout-minutes: 120
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq aria2 >/dev/null
           mkdir -p work && cd work
-          ok=""
-          for host in bigota.d.miui.com cdnorg.d.miui.com hugeota.d.miui.com bkt-sgp-miui-ota-update-alisgp.oss-ap-southeast-1.aliyuncs.com; do
+          HOSTS="cdn-ota.azureedge.net bkt-sgp-miui-ota-update-alisgp.oss-ap-southeast-1.aliyuncs.com bn.d.miui.com cdnorg.d.miui.com bigota.d.miui.com hugeota.d.miui.com"
+          # Cek dulu mirror mana yang menyediakan file (status + ukuran)
+          good=""
+          for host in $HOSTS; do
             url="https://${host}/${VERSION}/${ZIP_NAME}"
-            echo "==> mencoba ${url}"
-            rm -f ota.zip
-            if aria2c -q -x16 -s16 -k1M --retry-wait=5 --max-tries=3 -o ota.zip "$url"; then
+            info=$(curl -sIL --max-time 20 "$url" | tr -d '\r' | awk 'tolower($1)=="content-length:"{l=$2} /^HTTP\//{c=$2} END{print c, l}')
+            echo "probe ${host}: ${info:-tidak ada respon}"
+            case "$info" in 200\ [0-9]*) good="$good $host" ;; esac
+          done
+          [ -n "$good" ] || { echo "::error::Tidak ada mirror yang menyediakan ${ZIP_NAME}"; exit 1; }
+          ok=""
+          for host in $good; do
+            url="https://${host}/${VERSION}/${ZIP_NAME}"
+            echo "==> unduh dari ${url}"
+            rm -f ota.zip ota.zip.aria2
+            # mirror lambat/macet ditinggal: batas 35 menit & minimal 1 MB/s
+            if timeout 35m aria2c -x16 -s16 -k4M --file-allocation=none \
+                 --connect-timeout=30 --timeout=60 --max-tries=5 --retry-wait=5 \
+                 --lowest-speed-limit=1M --summary-interval=60 --console-log-level=warn \
+                 --download-result=hide -o ota.zip "$url"; then
               if [ -z "$ZIP_MD5" ] || echo "${ZIP_MD5}  ota.zip" | md5sum -c -; then
                 ok="$url"; break
               fi
               echo "::warning::MD5 tidak cocok dari ${host}"
+            else
+              echo "::warning::Unduhan dari ${host} gagal/terlalu lambat, pindah mirror"
             fi
           done
           [ -n "$ok" ] || { echo "::error::OTA ${ZIP_NAME} tidak bisa diunduh dari semua mirror"; exit 1; }
