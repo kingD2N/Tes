@@ -1,1 +1,1 @@
-firmware POCO F4 GT (ingres)
+# firmware POCO F4 GT (ingres)
