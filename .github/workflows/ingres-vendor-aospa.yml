@@ -1,0 +1,142 @@
+name: Ingres Vendor Blobs (AOSPA calcite)
+
+# Ekstrak vendor/xiaomi/ingres format AOSPA (calcite / Android 17) dari OTA full
+# HyperOS ingres memakai extract-utils AOSPA dan device tree kingD2N/Device_ingres_aospa.
+# Hasilnya: git bundle berisi branch "calcite" (orphan) untuk
+# kingD2N/proprietary_vendor_xiaomi_ingres, diterbitkan sebagai release di repo ini.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Versi HyperOS ingres"
+        default: "OS2.0.8.0.ULJCNXM"
+      zip_name:
+        description: "Nama file OTA full (recovery ROM)"
+        default: "ingres-ota_full-OS2.0.8.0.ULJCNXM-user-14.0-e181db717d.zip"
+      md5:
+        description: "MD5 OTA full (kosongkan untuk lewati cek)"
+        default: "e181db717dc1bc3f437e46d7e701a7c3"
+      device_ref:
+        description: "Branch Device_ingres_aospa"
+        default: "main"
+  push:
+    branches: [main]
+    paths: [".github/workflows/ingres-vendor-aospa.yml"]
+
+permissions:
+  contents: write
+
+jobs:
+  vendor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      VERSION: ${{ inputs.version || 'OS2.0.8.0.ULJCNXM' }}
+      ZIP_NAME: ${{ inputs.zip_name || 'ingres-ota_full-OS2.0.8.0.ULJCNXM-user-14.0-e181db717d.zip' }}
+      ZIP_MD5: ${{ inputs.md5 || 'e181db717dc1bc3f437e46d7e701a7c3' }}
+      DEVICE_REF: ${{ inputs.device_ref || 'main' }}
+      ROOT: ${{ github.workspace }}/root
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune -af >/dev/null 2>&1 || true
+          df -h /
+
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq aria2 erofs-utils e2fsprogs llvm zstd unzip >/dev/null
+
+      - name: Download OTA full
+        timeout-minutes: 120
+        run: |
+          mkdir -p "$ROOT" && cd "$ROOT"
+          HOSTS="cdn-ota.azureedge.net bkt-sgp-miui-ota-update-alisgp.oss-ap-southeast-1.aliyuncs.com bn.d.miui.com cdnorg.d.miui.com bigota.d.miui.com hugeota.d.miui.com"
+          ok=""
+          for host in $HOSTS; do
+            url="https://${host}/${VERSION}/${ZIP_NAME}"
+            code=$(curl -sIL --max-time 20 -o /dev/null -w '%{http_code}' "$url" || true)
+            echo "probe ${host}: ${code}"
+            [ "$code" = "200" ] || continue
+            rm -f ota.zip ota.zip.aria2
+            if timeout 35m aria2c -x16 -s16 -k4M --file-allocation=none \
+                 --connect-timeout=30 --timeout=60 --max-tries=5 --retry-wait=5 \
+                 --lowest-speed-limit=1M --summary-interval=60 --console-log-level=warn \
+                 --download-result=hide -o ota.zip "$url"; then
+              if [ -z "$ZIP_MD5" ] || echo "${ZIP_MD5}  ota.zip" | md5sum -c -; then
+                ok="$url"; break
+              fi
+            fi
+            echo "::warning::Unduhan dari ${host} gagal, pindah mirror"
+          done
+          [ -n "$ok" ] || { echo "::error::OTA ${ZIP_NAME} tidak bisa diunduh"; exit 1; }
+          echo "OTA_URL=$ok" >> "$GITHUB_ENV"
+
+      - name: Set up source tree
+        run: |
+          cd "$ROOT"
+          clone() { git clone -q --depth 1 -b "$2" "https://github.com/$1" "$3"; echo "$3: $(git -C "$3" log -1 --format='%h %s')"; }
+          clone AOSPA/android_tools_extract-utils calcite tools/extract-utils
+          clone AOSPA/android_prebuilts_extract-tools calcite prebuilts/extract-tools
+          clone kingD2N/Device_ingres_aospa "$DEVICE_REF" device/xiaomi/ingres
+          clone kingD2N/android_device_xiaomi_sm8450-common calcite device/xiaomi/sm8450-common
+          clone kingD2N/proprietary_vendor_xiaomi_ingres lineage-24.0 vendor/xiaomi/ingres
+          mkdir -p prebuilts/clang/host/linux-x86/llvm-binutils-stable
+          for t in llvm-objdump llvm-strip; do
+            ln -sf "$(command -v $t || ls /usr/lib/llvm-*/bin/$t | tail -n1)" prebuilts/clang/host/linux-x86/llvm-binutils-stable/$t
+          done
+          # branch calcite dimulai kosong (orphan); objek blob yang sama dengan lineage-24.0 tetap dipakai ulang
+          cd vendor/xiaomi/ingres
+          git checkout -q --orphan calcite
+          git rm -rfq .
+          df -h /
+
+      - name: Extract blobs
+        run: |
+          cd "$ROOT/device/xiaomi/ingres"
+          chmod +x extract-files.py setup-makefiles.py
+          set +e +o pipefail
+          ./extract-files.py --only-target "$ROOT/ota.zip" 2>&1 | tee "$ROOT/extract.log"
+          rc=${PIPESTATUS[0]}
+          echo "EXTRACT_RC=$rc" >> "$GITHUB_ENV"
+          [ "$rc" -eq 0 ] || echo "::error::extract-files.py gagal (rc=$rc), lihat extract.log di release"
+          rm -f "$ROOT/ota.zip"
+
+      - name: Commit and bundle
+        if: env.EXTRACT_RC == '0'
+        run: |
+          cd "$ROOT/vendor/xiaomi/ingres"
+          printf '# proprietary_vendor_xiaomi_ingres (AOSPA calcite)\n\nBlob POCO F4 GT / Redmi K50 Gaming (ingres) dari HyperOS %s untuk Paranoid Android calcite (Android 17).\nDibuat dengan device/xiaomi/ingres (kingD2N/Device_ingres_aospa) extract-files.py.\n' "$VERSION" > README.md
+          git add -A
+          git -c user.name="kingD2N" -c user.email="114895723+kingD2N@users.noreply.github.com" \
+            commit -q -m "ingres: Import AOSPA blobs from ${VERSION}"
+          git log --oneline -1
+          find . -path ./.git -prune -o -type f -print | wc -l
+          git bundle create "$ROOT/vendor-ingres-aospa-${VERSION}.bundle" calcite ^origin/lineage-24.0 \
+            || git bundle create "$ROOT/vendor-ingres-aospa-${VERSION}.bundle" calcite
+          ls -lh "$ROOT"/*.bundle
+
+      - name: Publish release
+        if: always() && env.OTA_URL != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd "$ROOT"
+          TAG="ingres-vendor-aospa-${VERSION}"
+          files=""
+          for f in extract.log vendor-ingres-aospa-${VERSION}.bundle; do [ -f "$f" ] && files="$files $f"; done
+          [ -n "$files" ] || exit 0
+          printf 'Vendor ingres format AOSPA calcite dari HyperOS %s.\n\nSumber: %s\n' "$VERSION" "$OTA_URL" > notes.md
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" $files --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" $files --repo "$GITHUB_REPOSITORY" \
+              --title "ingres vendor AOSPA ${VERSION}" --notes-file notes.md
+          fi
+
+      - name: Check result
+        if: always()
+        run: |
+          [ "${EXTRACT_RC:-1}" = "0" ] || { echo "::error::Ekstraksi gagal (rc=${EXTRACT_RC:-?})"; exit 1; }
