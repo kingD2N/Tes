@@ -1,0 +1,158 @@
+#!/sbin/sh
+# =============================================================================
+#  update-binary - Firmware @DEVICE@ dari HyperOS @VERSION@
+#  Flashable lewat custom recovery (TWRP / OrangeFox).
+#  Dibuat otomatis oleh scripts/make_fw_zip.sh
+#
+#  Urutan aman:
+#   1. cek device, cek semua partisi ada, cek ukuran image <= partisi
+#   2. cek hash setiap image di zip (SHA256SUMS)
+#   3. tulis ke slot NON-aktif dulu + baca ulang & cocokkan hash
+#   4. kalau slot non-aktif sukses semua, baru tulis slot aktif (+ cek ulang)
+#   Gagal di langkah mana pun sebelum slot aktif disentuh -> slot aktif utuh.
+# =============================================================================
+OUTFD=/proc/self/fd/$2
+ZIPFILE=$3
+
+DEVICE="@DEVICE@"
+VERSION="@VERSION@"
+IMAGES="@IMAGES@"
+TMPD=/tmp/fw_update
+ERRF=$TMPD/err
+
+ui_print() {
+    echo "ui_print $1" >> "$OUTFD"
+    echo "ui_print" >> "$OUTFD"
+}
+progress() { echo "set_progress $1" >> "$OUTFD"; }
+abort() {
+    ui_print "! $1"
+    ui_print "! Flash dibatalkan."
+    rm -rf "$TMPD"
+    exit 1
+}
+
+# alat hash yang tersedia di recovery
+HASH=""
+if command -v sha256sum >/dev/null 2>&1; then
+    HASH=sha256sum; SUMS=SHA256SUMS
+elif command -v sha1sum >/dev/null 2>&1; then
+    HASH=sha1sum; SUMS=SHA1SUMS
+fi
+
+# hash yang tercatat di zip untuk satu image
+want_hash() { grep "  $1\$" "$TMPD/$SUMS" | cut -d' ' -f1; }
+
+# hash N byte pertama dari partisi (baca ulang setelah tulis)
+part_hash() { # partisi ukuran
+    head -c "$2" "$BLK/$1" 2>/dev/null | $HASH | cut -d' ' -f1
+}
+
+# tulis images/<img> ke partisi, lalu baca ulang & cocokkan hash
+write_part() { # img partisi
+    rm -f "$ERRF"
+    { unzip -p "$ZIPFILE" "images/$1" || echo "unzip" >> "$ERRF"; } | \
+        { dd of="$BLK/$2" bs=1048576 2>/dev/null || echo "dd" >> "$ERRF"; }
+    [ -f "$ERRF" ] && abort "gagal menulis $1 -> $2 ($(tr "\n" " " < "$ERRF"))"
+    sync
+    if [ -n "$HASH" ]; then
+        size=$(unzip -l "$ZIPFILE" "images/$1" | awk -v f="images/$1" '$4==f {print $1}')
+        got=$(part_hash "$2" "$size")
+        [ "$got" = "$(want_hash "$1")" ] || abort "verifikasi $2 gagal (isi partisi tidak sama dengan $1)"
+    fi
+    return 0
+}
+
+flash_slot() { # suffix
+    for img in $IMAGES; do
+        p=${img%.img}
+        ui_print "  - $p$1"
+        write_part "$img" "$p$1"
+    done
+}
+
+# ------------------------------------------------------------------ mulai
+rm -rf "$TMPD"; mkdir -p "$TMPD"
+ui_print " "
+ui_print "=========================================="
+ui_print " Firmware $DEVICE"
+ui_print " HyperOS $VERSION"
+ui_print "=========================================="
+ui_print " "
+
+BLK=/dev/block/bootdevice/by-name
+[ -d "$BLK" ] || BLK=/dev/block/by-name
+[ -d "$BLK" ] || abort "folder by-name tidak ditemukan"
+
+# ---- cek device
+dev_ok=0
+for prop in ro.product.device ro.product.vendor.device ro.build.product ro.product.name; do
+    val=$(getprop "$prop" 2>/dev/null)
+    case "$val" in
+        "$DEVICE"|"$DEVICE"_*) dev_ok=1 ;;
+    esac
+done
+[ "$dev_ok" = 1 ] || abort "Device bukan $DEVICE ($(getprop ro.product.device))"
+ui_print "- Device: $DEVICE OK"
+
+# ---- slot aktif
+cur=$(getprop ro.boot.slot_suffix 2>/dev/null)
+case "$cur" in
+    _a) other=_b ;;
+    _b) other=_a ;;
+    *)  abort "slot aktif tidak terbaca (ro.boot.slot_suffix='$cur')" ;;
+esac
+ui_print "- Slot aktif: ${cur#_} (ditulis terakhir)"
+
+# ---- cek partisi & ukuran
+ui_print "- Cek partisi..."
+for img in $IMAGES; do
+    p=${img%.img}
+    size=$(unzip -l "$ZIPFILE" "images/$img" | awk -v f="images/$img" '$4==f {print $1}')
+    [ -n "$size" ] || abort "images/$img tidak ada di zip"
+    for s in _a _b; do
+        [ -e "$BLK/$p$s" ] || abort "partisi $p$s tidak ada di HP"
+        psize=$(blockdev --getsize64 "$BLK/$p$s" 2>/dev/null)
+        if [ -n "$psize" ] && [ "$size" -gt "$psize" ]; then
+            abort "$img ($size byte) lebih besar dari $p$s ($psize byte)"
+        fi
+    done
+done
+ui_print "  semua partisi ada, ukuran OK"
+progress 0.05
+
+# ---- cek hash image di dalam zip
+if [ -n "$HASH" ]; then
+    unzip -p "$ZIPFILE" "$SUMS" > "$TMPD/$SUMS" 2>/dev/null
+    [ -s "$TMPD/$SUMS" ] || abort "$SUMS tidak ada di zip"
+    ui_print "- Cek $SUMS isi zip..."
+    for img in $IMAGES; do
+        want=$(want_hash "$img")
+        [ -n "$want" ] || abort "$img tidak tercatat di $SUMS"
+        got=$(unzip -p "$ZIPFILE" "images/$img" | $HASH | cut -d' ' -f1)
+        [ "$got" = "$want" ] || abort "$img rusak (hash tidak cocok), download ulang zip"
+    done
+    ui_print "  semua image cocok"
+else
+    ui_print "! sha256sum/sha1sum tidak ada, cek hash dilewati"
+    ui_print "  (CRC zip tetap dicek oleh unzip)"
+fi
+progress 0.25
+
+# ---- flash: slot non-aktif dulu, baru slot aktif
+ui_print "- Flash slot ${other#_} (non-aktif)"
+flash_slot "$other"
+progress 0.60
+
+ui_print "- Flash slot ${cur#_} (aktif)"
+flash_slot "$cur"
+progress 1.0
+
+rm -rf "$TMPD"
+ui_print " "
+ui_print "=========================================="
+ui_print " Firmware selesai di-flash (slot A + B)."
+ui_print " Data, ROM, boot & recovery tidak disentuh."
+ui_print " Silakan flash ROM / reboot."
+ui_print "=========================================="
+exit 0
