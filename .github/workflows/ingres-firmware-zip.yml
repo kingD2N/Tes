@@ -1,0 +1,50 @@
+name: Ingres Firmware Zip (dari rilis yang ada)
+
+# Buat zip flashable TWRP/OrangeFox dari image yang SUDAH ada di rilis
+# (tanpa download OTA lagi), lalu upload ke rilis yang sama.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag rilis firmware"
+        default: "ingres-firmware-OS2.0.8.0.ULJCNXM"
+
+permissions:
+  contents: write
+
+jobs:
+  zip:
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ inputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download image dari rilis
+        run: |
+          mkdir -p imgs
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" -D imgs \
+            --pattern '*.img' --pattern SHA256SUMS
+          cd imgs
+          sha256sum -c SHA256SUMS
+          rm -f SHA256SUMS
+          ls -l
+
+      - name: Build flashable zip
+        run: |
+          VERSION="${TAG#ingres-firmware-}"
+          FW_ZIP="ingres-firmware-${VERSION}-flashable.zip"
+          bash scripts/make_fw_zip.sh imgs "$VERSION" "$FW_ZIP" ingres
+          unzip -l "$FW_ZIP"
+          sha256sum "$FW_ZIP" | tee "$FW_ZIP.sha256"
+          echo "FW_ZIP=$FW_ZIP" >> "$GITHUB_ENV"
+
+      - name: Upload ke rilis + update catatan
+        run: |
+          gh release upload "$TAG" "$FW_ZIP" "$FW_ZIP.sha256" --clobber --repo "$GITHUB_REPOSITORY"
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body -q .body \
+            | sed '/<!-- flashable -->/,$d' > notes.md
+          bash scripts/fw_zip_notes.sh "$FW_ZIP" >> notes.md
+          gh release edit "$TAG" --notes-file notes.md --repo "$GITHUB_REPOSITORY"
