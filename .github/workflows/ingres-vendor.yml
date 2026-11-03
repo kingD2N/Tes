@@ -18,6 +18,10 @@ on:
       md5:
         description: "MD5 OTA full (kosongkan untuk lewati cek)"
         default: "e181db717dc1bc3f437e46d7e701a7c3"
+      allow_prohibited:
+        description: "Izinkan file terlarang LineageOS (Megvii/SenseTime) - hanya untuk build pribadi"
+        type: boolean
+        default: false
   push:
     branches: [main]
     paths: [".github/workflows/ingres-vendor.yml"]
@@ -34,6 +38,7 @@ jobs:
       ZIP_NAME: ${{ inputs.zip_name || 'ingres-ota_full-OS2.0.8.0.ULJCNXM-user-14.0-e181db717d.zip' }}
       ZIP_MD5: ${{ inputs.md5 || 'e181db717dc1bc3f437e46d7e701a7c3' }}
       BRANCH: lineage-24.0
+      EXTRA_ARGS: ${{ inputs.allow_prohibited && '--allow-prohibited-files' || '' }}
       ROOT: ${{ github.workspace }}/root
     steps:
       - name: Free disk space
@@ -106,7 +111,7 @@ jobs:
           cd device/xiaomi/ingres
           chmod +x extract-files.py
           set +e +o pipefail
-          ./extract-files.py --only-target "$ROOT/ota.zip" 2>&1 | tee "$ROOT/extract.log"
+          ./extract-files.py --only-target $EXTRA_ARGS "$ROOT/ota.zip" 2>&1 | tee "$ROOT/extract.log"
           rc=${PIPESTATUS[0]}
           echo "EXTRACT_RC=$rc" >> "$GITHUB_ENV"
           set -e
