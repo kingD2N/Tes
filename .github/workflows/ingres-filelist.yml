@@ -1,0 +1,100 @@
+name: Ingres File List
+
+# Daftar semua file (path + ukuran + sha1) di partisi vendor/odm/product/system_ext
+# dari OTA full HyperOS ingres, untuk menyusun proprietary-files.txt (AOSPA/LineageOS).
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Versi HyperOS ingres"
+        default: "OS2.0.8.0.ULJCNXM"
+      zip_name:
+        description: "Nama file OTA full"
+        default: "ingres-ota_full-OS2.0.8.0.ULJCNXM-user-14.0-e181db717d.zip"
+      md5:
+        description: "MD5 OTA full (kosongkan untuk lewati cek)"
+        default: "e181db717dc1bc3f437e46d7e701a7c3"
+  push:
+    branches: [main]
+    paths: [".github/workflows/ingres-filelist.yml"]
+
+permissions:
+  contents: write
+
+jobs:
+  filelist:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      VERSION: ${{ inputs.version || 'OS2.0.8.0.ULJCNXM' }}
+      ZIP_NAME: ${{ inputs.zip_name || 'ingres-ota_full-OS2.0.8.0.ULJCNXM-user-14.0-e181db717d.zip' }}
+      ZIP_MD5: ${{ inputs.md5 || 'e181db717dc1bc3f437e46d7e701a7c3' }}
+      PARTS: vendor,odm,product,system_ext,vendor_dlkm
+    steps:
+      - name: Free disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+
+      - name: Install tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq aria2 erofs-utils e2fsprogs unzip >/dev/null
+
+      - name: Download OTA full
+        timeout-minutes: 90
+        run: |
+          mkdir -p work && cd work
+          ok=""
+          for host in cdn-ota.azureedge.net bkt-sgp-miui-ota-update-alisgp.oss-ap-southeast-1.aliyuncs.com bn.d.miui.com cdnorg.d.miui.com bigota.d.miui.com; do
+            url="https://${host}/${VERSION}/${ZIP_NAME}"
+            code=$(curl -sIL --max-time 20 -o /dev/null -w '%{http_code}' "$url" || true)
+            echo "probe ${host}: ${code}"
+            [ "$code" = "200" ] || continue
+            rm -f ota.zip ota.zip.aria2
+            if timeout 35m aria2c -x16 -s16 -k4M --file-allocation=none --connect-timeout=30 --timeout=60 \
+                 --max-tries=5 --lowest-speed-limit=1M --summary-interval=60 --console-log-level=warn \
+                 --download-result=hide -o ota.zip "$url"; then
+              { [ -z "$ZIP_MD5" ] || echo "${ZIP_MD5}  ota.zip" | md5sum -c -; } && { ok="$url"; break; }
+            fi
+          done
+          [ -n "$ok" ] || { echo "::error::OTA tidak bisa diunduh"; exit 1; }
+          unzip -q -o ota.zip payload.bin && rm -f ota.zip
+
+      - name: Extract partitions and list files
+        working-directory: work
+        run: |
+          curl -fsSL -o pdg.tgz https://github.com/ssut/payload-dumper-go/releases/download/1.3.0/payload-dumper-go_1.3.0_linux_amd64.tar.gz
+          tar xzf pdg.tgz payload-dumper-go
+          ./payload-dumper-go -c 4 -p "$PARTS" -o img payload.bin
+          rm -f payload.bin
+          mkdir -p out
+          for p in ${PARTS//,/ }; do
+            f="img/$p.img"; [ -f "$f" ] || continue
+            mkdir -p "fs/$p"
+            sudo fsck.erofs --extract="fs/$p" "$f" >/dev/null 2>&1 \
+              || sudo debugfs -R "rdump / fs/$p" "$f" >/dev/null 2>&1
+            rm -f "$f"
+            # path relatif seperti di proprietary-files.txt (vendor/..., odm/..., dst)
+            (cd fs && sudo find "$p" \( -type f -o -type l \) -printf '%p\t%s\n') >> out/filelist.tsv
+            for prop in "fs/$p/build.prop" "fs/$p/etc/build.prop"; do
+              [ -f "$prop" ] && sudo cp "$prop" "out/${p}_$(basename "$(dirname "$prop")")_build.prop" || true
+            done
+          done
+          sudo chown -R "$(id -u)" out fs
+          (cd fs && find . -type f -size -64M -print0 | xargs -0 sha1sum | sed 's#  \./#\t#') > out/sha1.tsv
+          sort -o out/filelist.tsv out/filelist.tsv
+          wc -l out/filelist.tsv
+          awk -F/ '{print $1}' out/filelist.tsv | sort | uniq -c
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: work/out
+        run: |
+          TAG="ingres-filelist-${VERSION}"
+          gzip -9 -k filelist.tsv sha1.tsv
+          files="filelist.tsv.gz sha1.tsv.gz $(ls *_build.prop 2>/dev/null | tr '\n' ' ')"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" $files --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" $files --repo "$GITHUB_REPOSITORY" \
+              --title "ingres file list ${VERSION}" --notes "Daftar file vendor/odm/product/system_ext/vendor_dlkm HyperOS ${VERSION}."
+          fi
